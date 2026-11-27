@@ -3,54 +3,104 @@ use eframe::egui::{self, Color32, FontId, RichText, Stroke, pos2, vec2};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const BACKGROUND: Color32 = Color32::from_rgb(12, 18, 28);
-const SIDEBAR: Color32 = Color32::from_rgb(16, 24, 37);
-const PANEL: Color32 = Color32::from_rgb(20, 31, 47);
-const BORDER: Color32 = Color32::from_rgb(42, 57, 77);
-const TEXT: Color32 = Color32::from_rgb(236, 243, 250);
-const MUTED: Color32 = Color32::from_rgb(159, 179, 199);
-const MINT: Color32 = Color32::from_rgb(105, 229, 200);
-const INK: Color32 = Color32::from_rgb(8, 41, 44);
-const ACTIVE: Color32 = Color32::from_rgb(26, 54, 62);
-const ALERT: Color32 = Color32::from_rgb(255, 183, 133);
+const BACKGROUND: Color32 = Color32::from_rgb(246, 247, 243);
+const SIDEBAR: Color32 = Color32::WHITE;
+const PANEL: Color32 = Color32::WHITE;
+const BORDER: Color32 = Color32::from_rgb(195, 205, 197);
+const TEXT: Color32 = Color32::from_rgb(24, 41, 34);
+const MUTED: Color32 = Color32::from_rgb(75, 93, 82);
+const GREEN: Color32 = Color32::from_rgb(17, 91, 66);
+const ACTIVE: Color32 = Color32::from_rgb(221, 239, 226);
+const ALERT: Color32 = Color32::from_rgb(151, 56, 27);
+
+fn semibold(size: f32) -> FontId {
+    FontId::new(size, egui::FontFamily::Name("Semibold".into()))
+}
+
+fn heading(text: &str, size: f32) -> RichText {
+    RichText::new(text).font(semibold(size)).color(TEXT)
+}
 
 pub fn configure(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    for (name, bytes) in [
+        (
+            "Open Sans",
+            &include_bytes!("fonts/OpenSans-Regular.ttf")[..],
+        ),
+        (
+            "Semibold",
+            &include_bytes!("fonts/OpenSans-Semibold.ttf")[..],
+        ),
+    ] {
+        fonts
+            .font_data
+            .insert(name.into(), egui::FontData::from_static(bytes).into());
+    }
+    let regular = fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .unwrap();
+    regular.insert(0, "Open Sans".into());
+    let mut bold = regular.clone();
+    bold.insert(0, "Semibold".into());
+    fonts.families.insert(semibold(18.0).family, bold);
+    ctx.set_fonts(fonts);
+
+    // Native system-theme events arrive after the app creator has returned.
+    ctx.set_theme(egui::Theme::Light);
     let mut style = (*ctx.style()).clone();
-    style.visuals = egui::Visuals::dark();
+    style.visuals = egui::Visuals::light();
     style.visuals.panel_fill = BACKGROUND;
     style.visuals.window_fill = PANEL;
-    style.visuals.extreme_bg_color = BACKGROUND;
+    style.visuals.extreme_bg_color = PANEL;
+    style.visuals.faint_bg_color = ACTIVE;
     style.visuals.override_text_color = Some(TEXT);
+    style.visuals.weak_text_color = Some(MUTED);
     style.visuals.selection.bg_fill = ACTIVE;
-    style.visuals.selection.stroke = Stroke::new(1.0_f32, MINT);
-    style.spacing.item_spacing = vec2(8.0, 8.0);
-    style.spacing.button_padding = vec2(13.0, 7.0);
-    style.spacing.interact_size.y = 34.0;
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, FontId::proportional(14.0));
-    for widget in [
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
+    style.visuals.selection.stroke = Stroke::new(1.5_f32, GREEN);
+    style.visuals.hyperlink_color = GREEN;
+    style.visuals.disabled_alpha = 0.68;
+    style.visuals.window_stroke = Stroke::new(1.0_f32, BORDER);
+    style.visuals.window_corner_radius = 14.into();
+    style.spacing.window_margin = egui::Margin::same(22);
+    style.spacing.item_spacing = vec2(10.0, 10.0);
+    style.spacing.button_padding = vec2(15.0, 8.0);
+    style.spacing.interact_size.y = 42.0;
+    for (role, font) in [
+        (egui::TextStyle::Small, FontId::proportional(15.0)),
+        (egui::TextStyle::Body, FontId::proportional(17.0)),
+        (egui::TextStyle::Button, semibold(16.0)),
+        (egui::TextStyle::Heading, semibold(28.0)),
+    ] {
+        style.text_styles.insert(role, font);
+    }
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    for (widget, color, border) in [
+        (&mut style.visuals.widgets.inactive, PANEL, BORDER),
+        (&mut style.visuals.widgets.hovered, ACTIVE, GREEN),
+        (&mut style.visuals.widgets.active, ACTIVE, GREEN),
     ] {
         widget.corner_radius = 8.into();
-        widget.bg_stroke = Stroke::new(1.0_f32, BORDER);
-        widget.fg_stroke = Stroke::new(1.0_f32, TEXT);
+        widget.bg_stroke = Stroke::new(1.0_f32, border);
+        widget.fg_stroke = Stroke::new(1.5_f32, TEXT);
+        widget.bg_fill = color;
+        widget.weak_bg_fill = color;
     }
-    style.visuals.widgets.inactive.bg_fill = PANEL;
-    style.visuals.widgets.inactive.weak_bg_fill = PANEL;
-    style.visuals.widgets.hovered.bg_fill = ACTIVE;
-    style.visuals.widgets.hovered.weak_bg_fill = ACTIVE;
-    style.visuals.widgets.active.bg_fill = ACTIVE;
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Light, style.clone());
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 
 fn primary(label: &str) -> egui::Button<'_> {
-    egui::Button::new(RichText::new(label).strong().color(INK))
-        .fill(MINT)
-        .stroke(Stroke::NONE)
-        .corner_radius(8)
+    egui::Button::new(
+        RichText::new(label)
+            .font(semibold(16.0))
+            .color(Color32::WHITE),
+    )
+    .fill(GREEN)
+    .stroke(Stroke::NONE)
+    .min_size(vec2(0.0, 44.0))
+    .corner_radius(8)
 }
 
 fn panel() -> egui::Frame {
@@ -94,7 +144,7 @@ fn cover(
             egui::Align2::CENTER_CENTER,
             initial,
             FontId::proportional((rect.height() * 0.42).min(46.0)),
-            MINT,
+            GREEN,
         );
     }
 }
@@ -124,7 +174,7 @@ fn thumbnail_row(
             rect.left_top() + vec2(0.0, 10.0),
             vec2(3.0, rect.height() - 20.0),
         );
-        ui.painter().rect_filled(rail, 3, MINT);
+        ui.painter().rect_filled(rail, 3, GREEN);
     }
     let thumb = egui::Rect::from_min_size(rect.left_top() + vec2(10.0, 10.0), vec2(55.0, 38.0));
     cover(ui, thumb, art, &game.name, 6);
@@ -133,12 +183,8 @@ fn thumbnail_row(
         pos2(left, rect.top()),
         pos2(rect.right() - 6.0, rect.bottom()),
     );
-    let mut name = egui::text::LayoutJob::simple(
-        game.name.clone(),
-        FontId::proportional(14.0),
-        TEXT,
-        clip.width(),
-    );
+    let mut name =
+        egui::text::LayoutJob::simple(game.name.clone(), semibold(16.0), TEXT, clip.width());
     name.wrap.max_rows = 1;
     let painter = ui.painter().with_clip_rect(clip);
     let name = painter.layout_job(name);
@@ -147,7 +193,7 @@ fn thumbnail_row(
         pos2(left, rect.top() + 33.0),
         egui::Align2::LEFT_TOP,
         &game.store,
-        FontId::proportional(12.0),
+        FontId::proportional(14.0),
         MUTED,
     );
     response.on_hover_text(&game.name)
@@ -155,52 +201,24 @@ fn thumbnail_row(
 
 impl App {
     fn library(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let (logo, _) = ui.allocate_exact_size(vec2(36.0, 36.0), egui::Sense::hover());
-            ui.painter().rect_filled(logo, 10, MINT);
-            let front =
-                egui::Rect::from_center_size(logo.center() + vec2(-3.0, 3.0), vec2(15.0, 12.0));
-            let back = front.translate(vec2(6.0, -6.0));
-            ui.painter()
-                .rect_stroke(back, 3, Stroke::new(1.7_f32, INK), egui::StrokeKind::Inside);
-            ui.painter().rect_filled(front, 3, MINT);
-            ui.painter().rect_stroke(
-                front,
-                3,
-                Stroke::new(1.7_f32, INK),
-                egui::StrokeKind::Inside,
-            );
-            ui.label(RichText::new("GameSaves").size(23.0).strong());
-        });
-        ui.add_space(22.0);
-        ui.label(RichText::new("Мои игры").size(16.0).strong());
+        ui.label(heading("Мои игры", 23.0));
+        ui.add_space(2.0);
         ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .hint_text("Найти игру…")
-                .margin(egui::Margin::symmetric(10, 7))
+                .margin(egui::Margin::symmetric(10, 9))
                 .desired_width(f32::INFINITY),
         );
-        ui.horizontal(|ui| {
-            if ui.button("Добавить игру").clicked() {
-                self.show_add = true;
-                self.status.clear();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Добавить").clicked() {
+                self.open_add();
             }
             if ui
                 .button("Обновить")
-                .on_hover_text("Найти установленные игры заново")
+                .on_hover_text("Повторить поиск игр на ПК")
                 .clicked()
             {
-                self.games = catalog::discover(&self.settings.custom_games);
-                self.artwork.refresh();
-                if let Some(game) = self
-                    .games
-                    .iter()
-                    .find(|game| Some(&game.id) == self.selected.as_ref())
-                {
-                    self.candidates = catalog::save_candidates(game);
-                } else if let Some(game) = self.games.first() {
-                    self.select(game.id.clone());
-                }
+                self.rescan();
             }
         });
         ui.add_space(9.0);
@@ -257,7 +275,7 @@ impl App {
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(vec2(width, 204.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 16, PANEL);
-        let art_width = (width * 0.50).clamp(215.0, 418.0);
+        let art_width = (width * 0.44).min(418.0);
         let art_rect = egui::Rect::from_min_max(
             pos2(rect.right() - art_width, rect.top()),
             rect.right_bottom(),
@@ -277,11 +295,11 @@ impl App {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         title.set_clip_rect(title_area);
-        title.label(RichText::new(&game.store).size(13.0).color(MINT));
+        title.label(RichText::new(&game.store).font(semibold(15.0)).color(GREEN));
         title.add_space(5.0);
         let mut job = egui::text::LayoutJob::simple(
             game.name.clone(),
-            FontId::proportional(31.0),
+            semibold(30.0),
             TEXT,
             title_area.width(),
         );
@@ -289,7 +307,7 @@ impl App {
         title
             .label(job)
             .on_hover_text(game.install_dir.display().to_string());
-        title.add_space(7.0);
+        title.add_space(2.0);
         if title
             .button(if self.show_setup {
                 "Свернуть настройки"
@@ -313,7 +331,7 @@ impl App {
         let ready = world.is_some() && ready_save.is_some();
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new("Обмен сохранениями").size(20.0).strong());
+            ui.label(heading("Обмен сохранениями", 20.0));
             if ready {
                 muted(ui, "Закрой игру перед отправкой или восстановлением.");
             } else {
@@ -351,7 +369,7 @@ impl App {
     fn history(&mut self, ui: &mut egui::Ui) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new("История версий").size(18.0).strong());
+            ui.label(heading("История версий", 22.0));
             if self.versions.is_empty() {
                 muted(ui, "Полученные и отправленные версии появятся здесь.");
                 return;
@@ -369,7 +387,7 @@ impl App {
                             label.clone()
                         };
                         let button = egui::Button::new(RichText::new(display).color(if selected {
-                            MINT
+                            GREEN
                         } else {
                             TEXT
                         }))
@@ -394,7 +412,7 @@ impl App {
     fn setup(&mut self, ui: &mut egui::Ui, game: &Game) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new("Настройки игры").size(18.0).strong());
+            ui.label(heading("Настройки игры", 22.0));
             ui.label("Файл сохранения");
             if !self.candidates.is_empty() {
                 egui::ComboBox::from_id_salt("candidates")
@@ -520,30 +538,39 @@ impl App {
         if !self.show_add {
             return;
         }
-        let modal = egui::Modal::new(egui::Id::new("add-game")).show(ctx, |ui| {
-            ui.set_width(390.0);
-            ui.heading("Добавить игру вручную");
-            ui.label("Название");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.new_game_name).desired_width(f32::INFINITY),
-            );
-            ui.label("Папка установки");
-            path_field(ui, &mut self.new_game_dir, false);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(self.config_error.is_none(), primary("Добавить"))
-                    .clicked()
-                {
-                    self.add_game();
-                }
-                if ui.button("Отмена").clicked() {
-                    self.show_add = false;
+        let modal = egui::Modal::new(egui::Id::new("add-game"))
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .inner_margin(24)
+                    .corner_radius(14),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.heading("Добавить игру");
+                muted(ui, "Укажи название и папку, куда установлена игра.");
+                ui.label("Название");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_game_name)
+                        .margin(egui::Margin::symmetric(10, 8))
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label("Папка установки");
+                path_field(ui, &mut self.new_game_dir, false);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.config_error.is_none(), primary("Добавить"))
+                        .clicked()
+                    {
+                        self.add_game();
+                    }
+                    if ui.button("Отмена").clicked() {
+                        self.show_add = false;
+                    }
+                });
+                if self.show_add && !self.status.is_empty() {
+                    ui.label(RichText::new(&self.status).color(ALERT));
                 }
             });
-            if self.show_add && !self.status.is_empty() {
-                ui.label(RichText::new(&self.status).color(ALERT));
-            }
-        });
         if modal.should_close() {
             self.show_add = false;
         }
@@ -554,7 +581,11 @@ fn path_field(ui: &mut egui::Ui, path: &mut String, file: bool) {
     ui.horizontal_wrapped(|ui| {
         let response = ui.add(
             egui::TextEdit::singleline(path)
-                .desired_width((ui.available_width() - 100.0).clamp(195.0, 440.0))
+                .margin(egui::Margin::symmetric(10, 8))
+                .desired_width(
+                    (ui.available_width() - if cfg!(windows) { 195.0 } else { 20.0 })
+                        .clamp(140.0, 440.0),
+                )
                 .hint_text("Полный путь"),
         );
         if !path.is_empty() {
@@ -595,12 +626,40 @@ impl App {
             }
             ctx.request_repaint_after(interval.saturating_sub(self.last_refresh.elapsed()));
         }
-        egui::SidePanel::left("game-list")
-            .exact_width(269.0)
-            .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(18))
+        egui::TopBottomPanel::top("brand")
+            .frame(
+                egui::Frame::new()
+                    .fill(PANEL)
+                    .inner_margin(egui::Margin::symmetric(24, 12)),
+            )
             .show(ctx, |ui| {
-                ui.add_enabled_ui(idle, |ui| self.library(ui));
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(vec2(37.0, 37.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 10, GREEN);
+                    for shift in [3.0, -3.0] {
+                        let tile = egui::Rect::from_center_size(
+                            rect.center() + vec2(shift, -shift),
+                            vec2(16.0, 12.0),
+                        );
+                        ui.painter().rect_filled(tile, 3, GREEN);
+                        ui.painter().rect_stroke(
+                            tile,
+                            3,
+                            Stroke::new(1.8_f32, Color32::WHITE),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    ui.label(heading("GameSaves", 24.0));
+                });
             });
+        if !self.games.is_empty() {
+            egui::SidePanel::left("game-list")
+                .exact_width(269.0)
+                .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(18))
+                .show(ctx, |ui| {
+                    ui.add_enabled_ui(idle, |ui| self.library(ui));
+                });
+        }
         if !self.status.is_empty() && !self.show_add {
             egui::TopBottomPanel::bottom("transfer-status")
                 .frame(egui::Frame::new().fill(SIDEBAR).inner_margin(12))
@@ -614,7 +673,7 @@ impl App {
                         {
                             ALERT
                         } else {
-                            MINT
+                            GREEN
                         };
                         ui.label(RichText::new(&self.status).color(color));
                     });
@@ -635,22 +694,16 @@ impl App {
                             ui.add_enabled_ui(idle, |ui| {
                                 self.game_header(ui, &game);
                                 ui.add_space(8.0);
-                                self.send_and_restore(ui, &game);
-                                ui.add_space(7.0);
                                 if self.show_setup {
                                     self.setup(ui, &game);
                                     ui.add_space(7.0);
                                 }
+                                self.send_and_restore(ui, &game);
+                                ui.add_space(7.0);
                                 self.history(ui);
                             });
                         } else {
-                            ui.add_space(18.0);
-                            ui.heading("Подключи первую игру");
-                            muted(ui, "Выбери установленную игру слева или добавь её вручную.");
-                            if ui.add(primary("Добавить игру")).clicked() {
-                                self.show_add = true;
-                                self.status.clear();
-                            }
+                            self.welcome(ui);
                         }
                         if let Some(error) = &self.config_error {
                             ui.label(
@@ -668,5 +721,156 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.draw(ctx);
+    }
+}
+// A save disk drawn in logical points stays sharp at native Windows DPI.
+fn save_illustration(ui: &egui::Ui, rect: egui::Rect) {
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 14, ACTIVE);
+    let center = rect.center();
+    let scale = (rect.width() / 258.0).min(rect.height() / 212.0).min(1.2);
+    let point = |x, y| center + vec2(x, y) * scale;
+    let area = |x, y, w, h| egui::Rect::from_min_size(point(x, y), vec2(w, h) * scale);
+    for col in 0..(rect.width() / 15.0) as usize {
+        for row in 0..(rect.height() / 15.0) as usize {
+            painter.circle_filled(
+                rect.min + vec2(9.0 + 15.0 * col as f32, 9.0 + 15.0 * row as f32),
+                1.1,
+                Color32::from_rgb(177, 204, 184),
+            );
+        }
+    }
+    painter.circle_filled(center, 86.0 * scale, Color32::from_rgb(237, 246, 230));
+    let edge = Color32::from_rgb(25, 68, 51);
+    for (dx, dy, fill) in [
+        (11.0, 10.0, Color32::from_rgb(138, 179, 150)),
+        (0.0, 0.0, GREEN),
+    ] {
+        let outline = [
+            (-52.0, -59.0),
+            (31.0, -59.0),
+            (52.0, -37.0),
+            (52.0, 59.0),
+            (-52.0, 59.0),
+        ]
+        .map(|(x, y)| point(x + dx, y + dy))
+        .to_vec();
+        painter.add(egui::Shape::convex_polygon(
+            outline,
+            fill,
+            Stroke::new(2.0 * scale, edge),
+        ));
+    }
+    painter.rect_filled(
+        area(-32.0, -58.0, 54.0, 38.0),
+        2,
+        Color32::from_rgb(163, 195, 174),
+    );
+    painter.rect_filled(area(4.0, -51.0, 10.0, 23.0), 1, edge);
+    painter.rect_filled(
+        area(-38.0, 1.0, 76.0, 56.0),
+        3,
+        Color32::from_rgb(255, 246, 219),
+    );
+    painter.rect_filled(
+        area(-38.0, 1.0, 76.0, 12.0),
+        2,
+        Color32::from_rgb(236, 173, 76),
+    );
+    for (y, end) in [(26.0, 26.0), (37.0, 13.0)] {
+        painter.line_segment(
+            [point(-25.0, y), point(end, y)],
+            Stroke::new(2.0 * scale, edge),
+        );
+    }
+}
+
+impl App {
+    fn open_add(&mut self) {
+        self.show_add = true;
+        self.status.clear();
+    }
+
+    fn rescan(&mut self) {
+        self.games = catalog::discover(&self.settings.custom_games);
+        self.artwork.refresh();
+        if let Some(game) = self
+            .games
+            .iter()
+            .find(|game| Some(&game.id) == self.selected.as_ref())
+        {
+            self.candidates = catalog::save_candidates(game);
+        } else if let Some(game) = self.games.first() {
+            self.select(game.id.clone());
+        } else {
+            self.selected = None;
+            self.candidates.clear();
+        }
+        self.status = if self.games.is_empty() {
+            "Поиск завершён. Игры не найдены. Можно добавить игру вручную.".into()
+        } else {
+            format!("Поиск завершён. Игр в библиотеке — {}.", self.games.len())
+        };
+    }
+
+    fn welcome(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width().min(900.0);
+        ui.vertical_centered(|ui| {
+            ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.add_space(4.0);
+                ui.label(heading("Библиотека игр", 31.0));
+                ui.add_space(8.0);
+                egui::Frame::new().fill(PANEL).stroke(Stroke::new(1.0_f32, BORDER))
+                    .corner_radius(18).inner_margin(18).show(ui, |ui| {
+                        let available = ui.available_width();
+                        let horizontal = available >= 620.0;
+                        let art_width = if horizontal { (available * 0.35).min(296.0) } else { available };
+                        let art_height = if horizontal { 212.0 } else { 126.0 };
+                        let layout = if horizontal { egui::Layout::left_to_right(egui::Align::Center) }
+                                     else { egui::Layout::top_down(egui::Align::Min) };
+                        ui.with_layout(layout, |ui| {
+                            let (rect, _) = ui.allocate_exact_size(vec2(art_width, art_height), egui::Sense::hover());
+                            save_illustration(ui, rect);
+                            ui.add_space(if horizontal { 14.0 } else { 4.0 });
+                            ui.vertical(|ui| {
+                                ui.label(heading("Добавь первую игру", 29.0));
+                                muted(ui, "Выбери папку игры, чтобы сохранять версии и передавать их друзьям.");
+                                ui.add_space(6.0);
+                                if ui.add(primary("Добавить игру")).clicked() {
+                                    self.open_add();
+                                }
+                                if ui.link(RichText::new("Повторить поиск на ПК").color(GREEN).font(semibold(16.0))).clicked() {
+                                    self.rescan();
+                                }
+                            });
+                        });
+                    });
+            });
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_theme_changes_preserve_library_contrast_and_type() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let input = egui::RawInput {
+                system_theme: Some(theme),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                let style = ctx.style();
+                assert_eq!(style.visuals.panel_fill, BACKGROUND);
+                assert_eq!(style.visuals.override_text_color, Some(TEXT));
+                assert_eq!(style.visuals.weak_text_color(), MUTED);
+                assert!(style.text_styles[&egui::TextStyle::Body].size >= 17.0);
+                assert!(style.spacing.interact_size.y >= 42.0);
+            });
+        }
     }
 }

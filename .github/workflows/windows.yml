@@ -36,7 +36,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist
-          Copy-Item target/release/game-saves.exe, README.md -Destination dist
+          Copy-Item target/release/game-saves.exe, README.md, src/fonts/OpenSans-LICENSE.txt -Destination dist
       - uses: actions/upload-artifact@v4
         with:
           name: GameSaves-windows-x64

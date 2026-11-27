@@ -287,31 +287,38 @@ impl App {
         let Some((version, destination)) = self.restore_confirmation.clone() else {
             return;
         };
-        egui::Modal::new(egui::Id::new("confirm-restore")).show(ctx, |ui| {
-            ui.heading("Восстановить сохранение?");
-            ui.label(format!(
-                "Будет заменён файл {}. Его резервная копия останется рядом.",
-                destination.display()
-            ));
-            ui.horizontal(|ui| {
-                if ui.button("Восстановить").clicked() {
-                    self.restore_confirmation = None;
-                    self.start_job(ctx, move || {
-                        snapshots::restore(&version, &destination)
-                            .map(|backup| {
-                                format!(
-                                    "Сохранение восстановлено. Резервная копия: {}",
-                                    backup.display()
-                                )
-                            })
-                            .map_err(|error| error.to_string())
-                    });
-                }
-                if ui.button("Отмена").clicked() {
-                    self.restore_confirmation = None;
-                }
+        egui::Modal::new(egui::Id::new("confirm-restore"))
+            .frame(
+                egui::Frame::popup(&ctx.style())
+                    .inner_margin(24)
+                    .corner_radius(14),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(460.0);
+                ui.heading("Восстановить сохранение?");
+                ui.label(format!(
+                    "Будет заменён файл {}. Его резервная копия останется рядом.",
+                    destination.display()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Восстановить").clicked() {
+                        self.restore_confirmation = None;
+                        self.start_job(ctx, move || {
+                            snapshots::restore(&version, &destination)
+                                .map(|backup| {
+                                    format!(
+                                        "Сохранение восстановлено. Резервная копия: {}",
+                                        backup.display()
+                                    )
+                                })
+                                .map_err(|error| error.to_string())
+                        });
+                    }
+                    if ui.button("Отмена").clicked() {
+                        self.restore_confirmation = None;
+                    }
+                });
             });
-        });
     }
 }
 
@@ -319,7 +326,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([840.0, 560.0]),
+            .with_min_inner_size([840.0, 420.0]),
         ..Default::default()
     };
     eframe::run_native(
