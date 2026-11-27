@@ -24,6 +24,7 @@ struct PendingDriveConnection {
 
 struct App {
     nickname_input: String,
+    drive_folder_link: String,
     drive: Option<drive::Drive>,
     connect_drive: Option<PendingDriveConnection>,
     cloud_list: Option<Receiver<drive::Result<Vec<(String, PathBuf)>>>>,
@@ -73,6 +74,7 @@ impl App {
             };
         let mut app = Self {
             nickname_input: settings.nickname.clone(),
+            drive_folder_link: String::new(),
             drive,
             connect_drive: None,
             cloud_list: None,
@@ -176,14 +178,23 @@ impl App {
     }
 
     fn remember_path(&mut self, id: &str) {
-        let path = PathBuf::from(self.save_path.trim());
+        self.save_preference(id, PathBuf::from(self.save_path.trim()));
+    }
+
+    fn save_preference(&mut self, id: &str, path: PathBuf) {
+        if self.config_error.is_some() {
+            return;
+        }
         if !catalog::usable_save(&path) {
             self.status = "Выберите существующий файл или папку сохранений.".into();
             return;
         }
         let previous = self.settings.save_paths.insert(id.to_owned(), path);
         match self.settings.write(&self.settings_path) {
-            Ok(()) => self.status = "Путь сохранён.".into(),
+            Ok(()) => {
+                self.save_path = self.settings.save_paths[id].to_string_lossy().into_owned();
+                self.status = "Сохранение выбрано.".into();
+            }
             Err(error) => {
                 if let Some(path) = previous {
                     self.settings.save_paths.insert(id.to_owned(), path);
@@ -195,7 +206,12 @@ impl App {
         }
     }
 
-    fn start_drive_connection(&mut self, client: drive::Client, ctx: &egui::Context) {
+    fn start_drive_connection(
+        &mut self,
+        client: drive::Client,
+        folder: Option<String>,
+        ctx: &egui::Context,
+    ) {
         if self.connect_drive.is_some() {
             return;
         }
@@ -208,7 +224,7 @@ impl App {
         });
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(drive::Drive::connect(client, &cancelled));
+            let _ = tx.send(drive::Drive::connect(client, folder.as_deref(), &cancelled));
             context.request_repaint();
         });
     }
@@ -245,6 +261,7 @@ impl App {
                     ) {
                         Ok(()) => {
                             self.drive = Some(new_drive);
+                            self.drive_folder_link.clear();
                             self.reset_drive_history();
                             self.status = "Google Диск подключён.".into();
                         }

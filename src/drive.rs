@@ -55,8 +55,12 @@ impl Folder {
 }
 
 impl Drive {
-    pub fn connect(client: Client, cancelled: &std::sync::atomic::AtomicBool) -> Result<Self> {
-        let (tokens, folder_id) = oauth::authorize(&client, cancelled)?;
+    pub fn connect(
+        client: Client,
+        requested_folder: Option<&str>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Self> {
+        let (tokens, folder_id) = oauth::authorize(&client, requested_folder, cancelled)?;
         let refresh = tokens
             .refresh_token
             .ok_or("Google не выдал долгосрочный доступ. Повтори подключение.")?;
@@ -318,6 +322,35 @@ fn upload_session(input: &str) -> Option<Url> {
         && url.path() == "/upload/drive/v3/files")
         .then_some(url)
 }
+pub fn folder_from_link(input: &str) -> Option<String> {
+    let url = Url::parse(input.trim()).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("drive.google.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    let segments: Vec<_> = url.path().trim_end_matches('/').split('/').collect();
+    let id = match segments.as_slice() {
+        ["", "drive", "folders", id] | ["", "folders", id] => *id,
+        ["", "drive", "u", account, "folders", id]
+            if !account.is_empty() && account.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            *id
+        }
+        ["", "open"] => {
+            return url
+                .query_pairs()
+                .find(|(key, id)| key == "id" && valid_id(id))
+                .map(|(_, id)| id.into_owned());
+        }
+        _ => return None,
+    };
+    valid_id(id).then(|| id.to_owned())
+}
+
 fn valid_id(id: &str) -> bool {
     (1..=200).contains(&id.len())
         && id
@@ -387,6 +420,25 @@ fn request_error(error: ureq::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn folder_links_extract_only_supported_drive_addresses() {
+        for link in [
+            "https://drive.google.com/drive/folders/folder-id?usp=sharing",
+            "https://drive.google.com/drive/u/0/folders/folder-id/",
+            "https://drive.google.com/open?id=folder-id",
+        ] {
+            assert_eq!(folder_from_link(link).as_deref(), Some("folder-id"));
+        }
+        for link in [
+            "https://drive.google.com.evil.net/drive/folders/folder-id",
+            "http://drive.google.com/drive/folders/folder-id",
+            "https://drive.google.com/file/d/file-id",
+            "https://drive.google.com/drive/folders/a%2Fb",
+        ] {
+            assert!(folder_from_link(link).is_none());
+        }
+    }
+
     #[test]
     fn connection_errors_identify_the_cause() {
         assert!(request_error(ureq::Error::HostNotFound).contains("DNS"));

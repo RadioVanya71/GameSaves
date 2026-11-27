@@ -79,7 +79,11 @@ pub(super) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
     }
 }
 
-pub fn authorize(client: &Client, cancelled: &AtomicBool) -> Result<(Tokens, String)> {
+pub fn authorize(
+    client: &Client,
+    requested_folder: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<(Tokens, String)> {
     check_cancelled(cancelled)?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(super::error)?;
     listener.set_nonblocking(true).map_err(super::error)?;
@@ -105,10 +109,13 @@ pub fn authorize(client: &Client, cancelled: &AtomicBool) -> Result<(Tokens, Str
         .append_pair("trigger_onepick", "true")
         .append_pair("allow_folder_selection", "true")
         .append_pair("mimetypes", "application/vnd.google-apps.folder");
+    if let Some(folder) = requested_folder {
+        url.query_pairs_mut().append_pair("file_ids", folder);
+    }
     check_cancelled(cancelled)?;
     webbrowser::open(url.as_str()).map_err(|_| "Не удалось открыть браузер.")?;
 
-    let (code, folder) = wait_for_choice(listener, &redirect, &state, cancelled)?;
+    let (code, folder) = wait_for_choice(listener, &redirect, &state, requested_folder, cancelled)?;
     check_cancelled(cancelled)?;
     let tokens = client.token([
         ("grant_type", "authorization_code"),
@@ -123,6 +130,7 @@ fn wait_for_choice(
     listener: TcpListener,
     redirect: &str,
     state: &str,
+    requested_folder: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<(String, String)> {
     let deadline = Instant::now() + Duration::from_secs(180);
@@ -155,7 +163,7 @@ fn wait_for_choice(
             }
             header.clear();
         }
-        let Some(result) = callback(&first_line, redirect, state) else {
+        let Some(result) = callback(&first_line, redirect, state, requested_folder) else {
             reply(
                 &mut socket,
                 "400 Bad Request",
@@ -169,7 +177,7 @@ fn wait_for_choice(
                 reply(
                     &mut socket,
                     "200 OK",
-                    "Папка не выбрана. Вернись в GameSaves.",
+                    "Папка не подключена. Подробности в GameSaves.",
                 );
                 return Err(err);
             }
@@ -184,7 +192,12 @@ fn wait_for_choice(
     Err("Выбор папки не завершён за 3 минуты. Начни подключение заново.".into())
 }
 
-fn callback(line: &[u8], expected: &str, state: &str) -> Option<Result<(String, String)>> {
+fn callback(
+    line: &[u8],
+    expected: &str,
+    state: &str,
+    requested_folder: Option<&str>,
+) -> Option<Result<(String, String)>> {
     let line = std::str::from_utf8(line).ok()?;
     let mut words = line.split_ascii_whitespace();
     if words.next()? != "GET" {
@@ -207,6 +220,9 @@ fn callback(line: &[u8], expected: &str, state: &str) -> Option<Result<(String, 
         let folder = get("picked_file_ids")
             .filter(|id| super::valid_id(id))
             .ok_or("Выбери одну папку на Google Диске.")?;
+        if requested_folder.is_some_and(|requested| requested != folder) {
+            return Err("В Google выбрана другая папка. Подключение не изменилось.".into());
+        }
         Ok((code, folder))
     };
     Some(result())
@@ -232,7 +248,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let cancelled = AtomicBool::new(true);
-        let error = wait_for_choice(listener, "", "", &cancelled).unwrap_err();
+        let error = wait_for_choice(listener, "", "", None, &cancelled).unwrap_err();
         assert!(error.contains("отменено"));
         assert!(TcpListener::bind(address).is_ok());
     }
@@ -243,11 +259,22 @@ mod tests {
         let valid =
             b"GET /oauth?state=random&code=one%2Ftwo&picked_file_ids=folder-ab HTTP/1.1\r\n";
         assert_eq!(
-            callback(valid, redirect, "random").unwrap().unwrap(),
+            callback(valid, redirect, "random", Some("folder-ab"))
+                .unwrap()
+                .unwrap(),
             ("one/two".into(), "folder-ab".into())
         );
-        assert!(callback(valid, redirect, "another").is_none());
+        assert!(callback(valid, redirect, "another", None).is_none());
+        assert!(
+            callback(valid, redirect, "random", Some("different-folder"))
+                .unwrap()
+                .is_err()
+        );
         let multiple = b"GET /oauth?state=random&code=one&picked_file_ids=f,g HTTP/1.1\r\n";
-        assert!(callback(multiple, redirect, "random").unwrap().is_err());
+        assert!(
+            callback(multiple, redirect, "random", None)
+                .unwrap()
+                .is_err()
+        );
     }
 }

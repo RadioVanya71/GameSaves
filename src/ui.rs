@@ -378,7 +378,29 @@ impl App {
                     "Подключить Google Диск"
                 };
                 if ui.add(primary(label)).clicked() {
-                    self.start_drive_connection(client, ui.ctx());
+                    self.start_drive_connection(client.clone(), None, ui.ctx());
+                }
+                ui.collapsing("Подключить по ссылке", |ui| {
+                    ui.label("Ссылка на папку Google Диска");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.drive_folder_link)
+                            .hint_text("https://drive.google.com/drive/folders/…")
+                            .desired_width(f32::INFINITY)
+                            .char_limit(2048),
+                    );
+                    let folder = crate::drive::folder_from_link(&self.drive_folder_link);
+                    if folder.is_none() && !self.drive_folder_link.trim().is_empty() {
+                        muted(ui, "Вставь ссылку на папку с drive.google.com.");
+                    }
+                    if ui
+                        .add_enabled(folder.is_some(), egui::Button::new("Открыть в Google"))
+                        .clicked()
+                    {
+                        self.start_drive_connection(client, folder, ui.ctx());
+                    }
+                });
+                if self.drive.is_none() {
+                    muted(ui, "Для отправки нужен доступ редактора к папке.");
                 }
             } else {
                 muted(ui, "В этой сборке подключение Google Диска недоступно.");
@@ -411,39 +433,49 @@ impl App {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
-            match ready_save.as_ref() {
-                Some(path) => {
-                    let slot = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-                    ui.label(format!("Сохранение: {slot}")).on_hover_text(path.display().to_string());
-                    if ready {
-                        muted(ui, "Сохрани игру и закрой её перед отправкой.");
-                    } else {
-                        muted(ui, "Для отправки подключи Google Диск.");
-                    }
-                }
-                None if !self.candidates.is_empty() => {
-                    let mut choice = None;
-                    egui::ComboBox::from_id_salt("choose-save-slot")
-                        .selected_text("Выбери мир или слот")
-                        .show_ui(ui, |ui| {
-                            for path in &self.candidates {
-                                if ui.selectable_label(false, path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())
-                                    .on_hover_text(path.display().to_string()).clicked() {
-                                    choice = Some(path.clone());
-                                }
+            if self.candidates.len() > 1 || (ready_save.is_some() && !self.candidates.is_empty()
+                && !self.candidates.iter().any(|path| Some(path) == ready_save.as_ref())) {
+                let mut choice = None;
+                let label = ready_save.as_deref().map_or_else(|| "Выбери мир или слот".into(), save_label);
+                egui::ComboBox::from_id_salt(("save-slot", &game.id))
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for path in &self.candidates {
+                            if ui.selectable_label(Some(path) == ready_save.as_ref(), save_label(path))
+                                .on_hover_text(path.display().to_string()).clicked() {
+                                choice = Some(path.clone());
                             }
-                        });
-                    if let Some(path) = choice {
-                        self.save_path = path.display().to_string();
-                        self.remember_path(&game.id);
+                        }
+                    });
+                if let Some(path) = choice {
+                    self.save_preference(&game.id, path);
+                }
+            } else if let Some(path) = &ready_save {
+                ui.label(format!("Сохранение: {}", save_label(path)))
+                    .on_hover_text(path.display().to_string());
+            } else {
+                muted(ui, "Сохранение не найдено. Сохранись в игре и закрой её или выбери нужный файл вручную.");
+            }
+            #[cfg(windows)]
+            ui.horizontal_wrapped(|ui| {
+                for (label, folder) in [("Выбрать файл", false), ("Выбрать папку мира", true)] {
+                    if ui.add_enabled(self.config_error.is_none(), egui::Button::new(label)).clicked() {
+                        let dialog = rfd::FileDialog::new();
+                        let chosen = if folder { dialog.pick_folder() } else { dialog.pick_file() };
+                        if let Some(path) = chosen {
+                            self.save_preference(&game.id, path);
+                        }
                     }
                 }
-                None => {
-                    muted(ui, "Сохранение не найдено. Сохранись в игре и закрой её. Если после этого слот не появился, его можно выбрать вручную.");
-                    if ui.button("Выбрать вручную").clicked() {
-                        self.show_setup = true;
-                    }
-                }
+            });
+            #[cfg(not(windows))]
+            if ui.button("Выбрать вручную").clicked() {
+                self.show_setup = true;
+            }
+            if ready {
+                muted(ui, "Сохрани игру и закрой её перед отправкой.");
+            } else if drive.is_none() {
+                muted(ui, "Для отправки подключи Google Диск.");
             }
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -658,6 +690,13 @@ impl App {
             self.show_add = false;
         }
     }
+}
+
+fn save_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn path_field(ui: &mut egui::Ui, path: &mut String, file: bool) {
