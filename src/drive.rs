@@ -55,8 +55,8 @@ impl Folder {
 }
 
 impl Drive {
-    pub fn connect(client: Client) -> Result<Self> {
-        let (tokens, folder_id) = oauth::authorize(&client)?;
+    pub fn connect(client: Client, cancelled: &std::sync::atomic::AtomicBool) -> Result<Self> {
+        let (tokens, folder_id) = oauth::authorize(&client, cancelled)?;
         let refresh = tokens
             .refresh_token
             .ok_or("Google не выдал долгосрочный доступ. Повтори подключение.")?;
@@ -73,6 +73,7 @@ impl Drive {
         struct Capabilities {
             can_add_children: bool,
         }
+        oauth::check_cancelled(cancelled)?;
         let metadata: Metadata = json(http(30)
             .get(format!("{FILES}/{folder_id}?supportsAllDrives=true&fields=name,mimeType,trashed,capabilities(canAddChildren)"))
             .header("Authorization", bearer(&tokens.access_token))

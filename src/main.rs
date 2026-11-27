@@ -12,13 +12,22 @@ mod world_folder;
 use catalog::{Game, Settings};
 use eframe::egui;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
+};
 use std::time::Instant;
+
+struct PendingDriveConnection {
+    result: Receiver<drive::Result<drive::Drive>>,
+    cancelled: Arc<AtomicBool>,
+}
 
 struct App {
     nickname_input: String,
     drive: Option<drive::Drive>,
-    connect_drive: Option<Receiver<drive::Result<drive::Drive>>>,
+    connect_drive: Option<PendingDriveConnection>,
     cloud_list: Option<Receiver<drive::Result<Vec<(String, PathBuf)>>>>,
     cloud_checked: Option<Instant>,
     cloud_error: String,
@@ -304,12 +313,28 @@ impl App {
         }
         self.cloud_error.clear();
         let (tx, rx) = mpsc::channel();
-        self.connect_drive = Some(rx);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.connect_drive = Some(PendingDriveConnection {
+            result: rx,
+            cancelled: cancelled.clone(),
+        });
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(drive::Drive::connect(client));
+            let _ = tx.send(drive::Drive::connect(client, &cancelled));
             context.request_repaint();
         });
+    }
+
+    fn cancel_drive_connection(&mut self) {
+        if let Some(pending) = self.connect_drive.take() {
+            pending.cancelled.store(true, Ordering::Relaxed);
+            self.status = if self.drive.is_some() {
+                "Смена папки отменена."
+            } else {
+                "Подключение Google Диска отменено."
+            }
+            .into();
+        }
     }
 
     fn reset_drive_history(&mut self) {
@@ -322,8 +347,8 @@ impl App {
     }
 
     fn poll_drive(&mut self, ctx: &egui::Context) {
-        if let Some(rx) = &self.connect_drive {
-            match rx.try_recv() {
+        if let Some(pending) = &self.connect_drive {
+            match pending.result.try_recv() {
                 Ok(Ok(new_drive)) => {
                     self.connect_drive = None;
                     match drive::save(

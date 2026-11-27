@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, BufWriter, Read, Write},
     net::TcpListener,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use url::Url;
@@ -93,7 +94,16 @@ fn random_string() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-pub fn authorize(client: &Client) -> Result<(Tokens, String)> {
+pub(super) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err("Подключение Google Диска отменено.".into())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn authorize(client: &Client, cancelled: &AtomicBool) -> Result<(Tokens, String)> {
+    check_cancelled(cancelled)?;
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(super::error)?;
     listener.set_nonblocking(true).map_err(super::error)?;
     let redirect = format!(
@@ -118,10 +128,29 @@ pub fn authorize(client: &Client) -> Result<(Tokens, String)> {
         .append_pair("trigger_onepick", "true")
         .append_pair("allow_folder_selection", "true")
         .append_pair("mimetypes", "application/vnd.google-apps.folder");
+    check_cancelled(cancelled)?;
     webbrowser::open(url.as_str()).map_err(|_| "Не удалось открыть браузер.")?;
 
+    let (code, folder) = wait_for_choice(listener, &redirect, &state, cancelled)?;
+    check_cancelled(cancelled)?;
+    let tokens = client.token([
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("code_verifier", verifier.as_str()),
+        ("redirect_uri", redirect.as_str()),
+    ])?;
+    Ok((tokens, folder))
+}
+
+fn wait_for_choice(
+    listener: TcpListener,
+    redirect: &str,
+    state: &str,
+    cancelled: &AtomicBool,
+) -> Result<(String, String)> {
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
+        check_cancelled(cancelled)?;
         let mut socket = match listener.accept() {
             Ok((socket, _)) => socket,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -149,7 +178,7 @@ pub fn authorize(client: &Client) -> Result<(Tokens, String)> {
             }
             header.clear();
         }
-        let Some(result) = callback(&first_line, &redirect, &state) else {
+        let Some(result) = callback(&first_line, redirect, state) else {
             reply(
                 &mut socket,
                 "400 Bad Request",
@@ -173,15 +202,9 @@ pub fn authorize(client: &Client) -> Result<(Tokens, String)> {
             "200 OK",
             "Выбор папки получен. Результат подключения появится в GameSaves.",
         );
-        let tokens = client.token([
-            ("grant_type", "authorization_code"),
-            ("code", code.as_str()),
-            ("code_verifier", verifier.as_str()),
-            ("redirect_uri", redirect.as_str()),
-        ])?;
-        return Ok((tokens, folder));
+        return Ok((code, folder));
     }
-    Err("Время входа истекло. Нажми «Подключить Google Диск» ещё раз.".into())
+    Err("Выбор папки не завершён за 3 минуты. Начни подключение заново.".into())
 }
 
 fn callback(line: &[u8], expected: &str, state: &str) -> Option<Result<(String, String)>> {
@@ -226,6 +249,17 @@ fn reply(socket: &mut impl Write, status: &str, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_folder_selection_releases_the_callback_listener() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = wait_for_choice(listener, "", "", &cancelled).unwrap_err();
+        assert!(error.contains("отменено"));
+        assert!(TcpListener::bind(address).is_ok());
+    }
+
     #[test]
     fn desktop_registration_imports_only_the_installed_client() {
         let path = tempfile::NamedTempFile::new().unwrap();

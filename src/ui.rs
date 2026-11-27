@@ -417,6 +417,9 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     ui.spinner();
                     ui.label("Разреши доступ и выбери папку в браузере.");
+                    if ui.button("Отменить").clicked() {
+                        self.cancel_drive_connection();
+                    }
                 });
             } else if let Some(client) = self.drive.as_ref().map(crate::drive::Drive::client).or_else(crate::drive::Client::bundled) {
                 let label = if self.drive.is_some() { "Выбрать другую папку" } else { "Подключить Google Диск" };

@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "game-saves"
-version = "0.7.0-beta.2"
+version = "0.7.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",
