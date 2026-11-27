@@ -171,7 +171,17 @@ fn thumbnail_row(
     selected: bool,
 ) -> egui::Response {
     let available = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(available, 58.0), egui::Sense::click());
+    let name = ui.painter().layout_job(egui::text::LayoutJob::simple(
+        game.name.clone(),
+        semibold(16.0),
+        TEXT,
+        (available - 81.0).max(1.0),
+    ));
+    let name_height = name.size().y;
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(available, (name_height + 37.0).max(58.0)),
+        egui::Sense::click(),
+    );
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::SelectableLabel,
@@ -198,14 +208,10 @@ fn thumbnail_row(
         pos2(left, rect.top()),
         pos2(rect.right() - 6.0, rect.bottom()),
     );
-    let mut name =
-        egui::text::LayoutJob::simple(game.name.clone(), semibold(16.0), TEXT, clip.width());
-    name.wrap.max_rows = 1;
     let painter = ui.painter().with_clip_rect(clip);
-    let name = painter.layout_job(name);
     painter.galley(pos2(left, rect.top() + 11.0), name, TEXT);
     painter.text(
-        pos2(left, rect.top() + 33.0),
+        pos2(left, rect.top() + 13.0 + name_height),
         egui::Align2::LEFT_TOP,
         &game.store,
         FontId::proportional(14.0),
@@ -268,9 +274,8 @@ impl App {
         egui::ScrollArea::vertical()
             .id_salt("library")
             .auto_shrink([false, false])
-            .show_rows(ui, 58.0, matches.len(), |ui, range| {
-                for index in range {
-                    let game = matches[index];
+            .show(ui, |ui| {
+                for game in matches {
                     let art = self.artwork.get(
                         game,
                         self.settings.covers.get(&game.id).map(PathBuf::as_path),
@@ -402,60 +407,55 @@ impl App {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Группа Google Диска", 22.0));
-            if let Some(link) = self.settings.groups.get(&game.id).cloned() {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Скопировать приглашение").clicked() {
-                        ui.ctx().copy_text(link);
+            if let Some(rx)=&self.joining {
+                match rx.try_recv(){
+                    Ok(Ok(link))=>{self.joining=None;self.change_group(game,Some(link));}
+                    Ok(Err(e))=>{self.joining=None;self.status=format!("Не удалось отправить заявку. {e}");}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.joining=None;self.status="Не удалось связаться с сервисом.".into();}
+                    _=>{}
+                }
+            }
+            if let Some(group)=self.group(){
+                if let Some(m)=&self.membership{
+                    match m.role.as_str(){
+                        "pending"=>{
+                            ui.label(format!("Заявка отправлена. Ждём подтверждения владельца. Номер устройства: {}",m.id));
+                            ui.collapsing("Я владелец этой папки",|ui|{
+                                ui.label("Скопируй код, затем подтверди подключение в браузере.");
+                                if ui.button("Скопировать код своего устройства").clicked(){ui.ctx().copy_text(m.proof.clone());}
+                                ui.hyperlink_to("Подключить папку через Google",format!("{}/create?device={}",group.origin(),m.id));
+                            });
+                        }
+                        "denied"=>{ui.label("Владелец отклонил заявку.");}
+                        _=>{ui.label("Папка подключена");if ui.button("Скопировать ссылку на папку").clicked(){ui.ctx().copy_text(format!("https://drive.google.com/drive/folders/{}",m.folder));}}
                     }
-                    if ui.button("Выйти из группы").clicked() {
-                        self.change_group(game, None);
+                    let mut decision=None;
+                    for req in &m.requests {
+                        ui.horizontal_wrapped(|ui|{ui.label(format!("{} · устройство {}",req.nick,req.id));
+                            if ui.button("Разрешить").clicked(){decision=Some((req.id.clone(),true));}
+                            if ui.button("Отклонить").clicked(){decision=Some((req.id.clone(),false));}
+                        });
                     }
-                });
+                    if let Some((id,allow))=decision{self.start_job(ui.ctx(),move||group.decide(&id,allow));}
+                } else if group.device {ui.label("Проверяем доступ устройства…");}
+                if ui.button("Отключиться").clicked(){self.change_group(game,None);}
             } else {
-                let service = self.group_origin.as_deref();
-                if let Some(url) = service {
-                    ui.hyperlink_to(
-                        "Создать группу",
-                        format!("{}/create", url.trim_end_matches('/')),
-                    );
-                    self.invite_field(ui, game);
-                } else {
-                    muted(ui, "В этой сборке сервис групп не подключён. Создать группу из папки Google Диска пока нельзя.");
-                    ui.collapsing("У меня есть приглашение GameSaves", |ui| {
-                        self.invite_field(ui, game);
-                    });
+                ui.label("Ссылка на папку Google Диска");
+                ui.add(egui::TextEdit::singleline(&mut self.invitation).hint_text("https://drive.google.com/drive/folders/…").desired_width(f32::INFINITY));
+                let folder=crate::group::folder_id(&self.invitation);
+                if !self.invitation.trim().is_empty() && folder.is_none(){muted(ui,"Открой папку на drive.google.com и скопируй её адрес.");}
+                if self.group_origin.is_none(){muted(ui,"Сервис подключения недоступен в этой сборке. Локальный обмен можно проверить в деморежиме.");}
+                if ui.add_enabled(self.config_error.is_none() && self.group_origin.is_some() && folder.is_some() && self.joining.is_none(),egui::Button::new("Подключить папку")).clicked(){
+                    let origin=self.group_origin.clone().unwrap();let nick=self.settings.nickname.clone();
+                    let folder=folder.unwrap();let context=ui.ctx().clone();
+                    let (tx,rx)=std::sync::mpsc::channel();self.joining=Some(rx);
+                    std::thread::spawn(move||{let _=tx.send(crate::group::join(&origin,folder,nick));context.request_repaint();});
                 }
             }
             if !self.cloud_error.is_empty() {
                 ui.label(&self.cloud_error);
             }
         });
-    }
-    fn invite_field(&mut self, ui: &mut egui::Ui, game: &Game) {
-        ui.label("Приглашение GameSaves от владельца группы");
-        ui.add(
-            egui::TextEdit::singleline(&mut self.invitation)
-                .hint_text("Вставь приглашение")
-                .password(true),
-        );
-        let input = self.invitation.trim();
-        let parsed = crate::group::Group::parse(input);
-        if !input.is_empty() && parsed.is_err() {
-            let drive = url::Url::parse(input)
-                .ok()
-                .is_some_and(|u| u.host_str() == Some("drive.google.com"));
-            ui.label(egui::RichText::new(if drive {
-                "Это ссылка на папку Google Диска. Для входа друг должен прислать приглашение из GameSaves."
-            } else {
-                "Скопируй приглашение целиком, включая часть после #."
-            }).color(ALERT));
-        }
-        if ui
-            .add_enabled(parsed.is_ok(), egui::Button::new("Войти в группу"))
-            .clicked()
-        {
-            self.change_group(game, Some(input.to_string()));
-        }
     }
     fn change_group(&mut self, game: &Game, link: Option<String>) {
         if self.config_error.is_some() {
@@ -484,7 +484,14 @@ impl App {
             .cloned();
         let world = self.world();
         let cloud = self.group();
-        let ready = (world.is_some() || cloud.is_some()) && ready_save.is_some();
+        let ready = ready_save.is_some()
+            && cloud.as_ref().map_or(world.is_some(), |g| {
+                !g.device
+                    || self
+                        .membership
+                        .as_ref()
+                        .is_some_and(|m| matches!(m.role.as_str(), "owner" | "member"))
+            });
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
@@ -493,7 +500,7 @@ impl App {
             } else {
                 muted(
                     ui,
-                    "Выбери файл сохранения и подключи общую папку в настройках игры.",
+                    "Выбери сейв в настройках игры. Для обмена с другом подключись к группе по приглашению.",
                 );
             }
             ui.add_space(4.0);
@@ -607,26 +614,6 @@ impl App {
             {
                 self.remember_path(&game.id);
             }
-            ui.separator();
-            ui.label("Общая папка");
-            path_field(ui, &mut self.shared_path, false);
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Код мира");
-                ui.add(egui::TextEdit::singleline(&mut self.world_code).desired_width(135.0));
-                if ui
-                    .add_enabled(
-                        self.config_error.is_none(),
-                        egui::Button::new("Подключить папку"),
-                    )
-                    .clicked()
-                {
-                    self.sync_settings(&game.id);
-                }
-            });
-            muted(
-                ui,
-                "На обоих ПК выбери одну общую папку и одинаковый код мира.",
-            );
             #[cfg(windows)]
             self.cover_settings(ui, game);
         });
@@ -1026,7 +1013,7 @@ impl App {
                             ui.add_space(if horizontal { 14.0 } else { 4.0 });
                             ui.vertical(|ui| {
                                 ui.label(heading("Добавь первую игру", 29.0));
-                                muted(ui, "Укажи папку установленной игры. Здесь появятся её обложка и история сохранений.");
+                                muted(ui, "Добавь игру, затем в её настройках выбери файл сохранения или папку мира. Если игр нет, нажми «Деморежим» вверху.");
                                 ui.add_space(6.0);
                                 ui.horizontal_wrapped(|ui| {
                                 if ui.add(primary("Добавить игру")).clicked() {

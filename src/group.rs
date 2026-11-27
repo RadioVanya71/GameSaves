@@ -17,6 +17,68 @@ fn err(e: impl std::fmt::Display) -> String {
 pub struct Group {
     base: String,
     auth: String,
+    pub device: bool,
+}
+#[derive(serde::Deserialize)]
+pub struct Applicant {
+    pub id: String,
+    pub nick: String,
+}
+#[derive(serde::Deserialize)]
+pub struct Membership {
+    pub role: String,
+    pub id: String,
+    pub folder: String,
+    pub proof: String,
+    pub requests: Vec<Applicant>,
+}
+
+pub fn folder_id(input: &str) -> Option<String> {
+    let url = Url::parse(input.trim()).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("drive.google.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return None;
+    }
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    let id = match &parts[..] {
+        ["drive", "folders", id] | ["drive", "u", _, "folders", id] => *id,
+        _ => return None,
+    };
+    (!id.is_empty()
+        && id.len() <= 200
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == '-' as u8 || b == '_' as u8))
+    .then(|| id.to_string())
+}
+pub fn join(origin: &str, folder: String, nick: String) -> Result<String> {
+    let data = serde_json::json!({"folder":folder,"nick":nick}).to_string();
+    let mut r = http()
+        .post(format!("{origin}/devices"))
+        .header("Content-Type", "application/json")
+        .send(data.as_bytes())
+        .map_err(err)?;
+    let reply: serde_json::Value =
+        serde_json::from_str(&r.body_mut().read_to_string().map_err(err)?).map_err(err)?;
+    let token = reply["token"]
+        .as_str()
+        .ok_or("Сервис не выдал ключ устройства.")?;
+    let link = format!("{origin}/device#{token}");
+    Group::parse(&link)?;
+    Ok(link)
+}
+fn http() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .https_only(true)
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build(),
+    )
 }
 impl Group {
     pub fn parse(input: &str) -> Result<Self> {
@@ -24,7 +86,7 @@ impl Group {
         let token = url.fragment().unwrap_or_default();
         if url.scheme() != "https"
             || url.host_str().is_none()
-            || url.path() != "/join"
+            || !matches!(url.path(), "/join" | "/device")
             || url.password().is_some()
             || !url.username().is_empty()
             || url.query().is_some()
@@ -38,20 +100,31 @@ impl Group {
         Ok(Self {
             base: format!("{}/versions", url.origin().ascii_serialization()),
             auth: format!("Bearer {token}"),
+            device: url.path() == "/device",
         })
     }
-    fn http(&self) -> ureq::Agent {
-        ureq::Agent::new_with_config(
-            ureq::Agent::config_builder()
-                .https_only(true)
-                .max_redirects(0)
-                .timeout_global(Some(Duration::from_secs(120)))
-                .build(),
-        )
+    pub fn origin(&self) -> &str {
+        self.base.strip_suffix("/versions").unwrap()
+    }
+    pub fn membership(&self) -> Result<Membership> {
+        let mut r = http()
+            .get(format!("{}/membership", self.origin()))
+            .header("Authorization", &self.auth)
+            .call()
+            .map_err(err)?;
+        serde_json::from_str(&r.body_mut().read_to_string().map_err(err)?).map_err(err)
+    }
+    pub fn decide(&self, id: &str, allow: bool) -> Result<String> {
+        let decision = if allow { "allow" } else { "deny" };
+        http()
+            .post(format!("{}/decision/{id}/{decision}", self.origin()))
+            .header("Authorization", &self.auth)
+            .send_empty()
+            .map_err(err)?;
+        Ok("Заявка обработана.".into())
     }
     pub fn list(&self) -> Result<Vec<(String, PathBuf)>> {
-        let mut r = self
-            .http()
+        let mut r = http()
             .get(format!("{}?authors=1", self.base))
             .header("Authorization", &self.auth)
             .call()
@@ -101,8 +174,7 @@ impl Group {
             self.base,
             archive.file_name().unwrap().to_string_lossy()
         );
-        let r = self
-            .http()
+        let r = http()
             .put(url)
             .header("Authorization", &self.auth)
             .send(fs::File::open(archive).map_err(err)?)
@@ -117,8 +189,7 @@ impl Group {
             .to_str()
             .filter(|n| snapshots::valid_version_name(n))
             .ok_or("Некорректная версия.")?;
-        let mut r = self
-            .http()
+        let mut r = http()
             .get(format!("{}/{}", self.base, name))
             .header("Authorization", &self.auth)
             .call()

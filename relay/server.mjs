@@ -28,6 +28,10 @@ function archiveAuthor(archive) {
   }
   return null;
 }
+db.exec(`CREATE TABLE IF NOT EXISTS folder_groups(folder TEXT PRIMARY KEY, grp TEXT UNIQUE NOT NULL);
+CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, secret TEXT UNIQUE NOT NULL, folder TEXT NOT NULL, nick TEXT NOT NULL, role TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS devices_folder ON devices(folder,role);`);
+const deviceKey = () => randomBytes(8).toString('hex');
 const sessions = new Map();
 const nonce = () => randomBytes(32).toString('base64url');
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -78,7 +82,7 @@ async function serve(req,res) {
   if (url.pathname === '/create' && req.method === 'GET') {
     if(sessions.size >= 5000) fail(429);
     const key=nonce(),state=nonce();
-    sessions.set(key,{state,until:Date.now()+600000});
+    sessions.set(key,{state,device:url.searchParams.get("device"),until:Date.now()+600000});
     res.setHeader('Set-Cookie','gs='+key+'; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600');
     const query=new URLSearchParams({client_id:env.GOOGLE_CLIENT_ID,redirect_uri:callback,response_type:'code',scope:'https://www.googleapis.com/auth/drive.file',state,access_type:'offline',prompt:'consent'});
     res.writeHead(302,{Location:'https://accounts.google.com/o/oauth2/v2/auth?'+query});return res.end();
@@ -101,20 +105,60 @@ async function serve(req,res) {
       return page(picker.replace('/*CONFIG*/',()=>config));
     }
     if(req.method!=='POST' || req.headers.origin!==origin) fail(403);
-    const folder=(await body(req,256)).toString();
+    const choice=JSON.parse((await body(req,512)).toString());
+    const folder=choice.folder;
+    const device=db.prepare('SELECT * FROM devices WHERE id=?').get(s.device||'');
+    // Only a pending device with a proof displayed locally can become an owner.
+    if(!device || device.folder!==folder || device.role!=='pending' ||
+       !/^[a-f0-9]{12}$/.test(choice.proof||'') || device.secret.slice(-12)!==choice.proof) fail(403);
     if(!/^[a-zA-Z0-9_-]{1,200}$/.test(folder)) fail(400);
-    const metadata=await (await google(drive+'/'+folder+'?supportsAllDrives=true&fields=mimeType,trashed,capabilities(canAddChildren)',{headers:{Authorization:'Bearer '+s.oauth.access_token}})).json();
-    if(metadata.trashed || metadata.mimeType!=='application/vnd.google-apps.folder' || !metadata.capabilities?.canAddChildren) fail(403);
-    const token=nonce();
-    db.prepare('INSERT INTO groups VALUES(?,?,?)').run(hash(token),folder,seal(s.oauth.refresh_token));
+    const metadata=await (await google(drive+'/'+folder+'?supportsAllDrives=true&fields=ownedByMe,mimeType,trashed,capabilities(canAddChildren)',{headers:{Authorization:'Bearer '+s.oauth.access_token}})).json();
+    if(!metadata.ownedByMe || metadata.trashed || metadata.mimeType!=='application/vnd.google-apps.folder' || !metadata.capabilities?.canAddChildren) fail(403);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      let grp=db.prepare('SELECT grp FROM folder_groups WHERE folder=?').get(folder)?.grp;
+      if(!grp) {
+        grp=hash(nonce());
+        db.prepare('INSERT INTO groups VALUES(?,?,?)').run(grp,folder,seal(s.oauth.refresh_token));
+        db.prepare('INSERT INTO folder_groups VALUES(?,?)').run(folder,grp);
+      } else {
+        db.prepare('UPDATE groups SET credential=? WHERE id=?').run(seal(s.oauth.refresh_token),grp);
+      }
+      db.prepare("UPDATE devices SET role='owner' WHERE id=?").run(device.id);
+      db.exec('COMMIT');
+    } catch(error) {db.exec('ROLLBACK');throw error;}
     sessions.delete(sid);
-    return json({invite:origin+'/join#'+token});
+    return json({connected:true});
+  }
+  if(url.pathname==='/devices' && req.method==='POST') {
+    const {folder,nick}=JSON.parse((await body(req,1024)).toString());
+    if(typeof folder!=='string'|| !/^[a-zA-Z0-9_-]{1,200}$/.test(folder) || typeof nick!=='string'|| !/^[\p{L}\p{N} ._-]{1,24}$/u.test(nick) || !nick.trim()) fail(400);
+    db.prepare("DELETE FROM devices WHERE role='pending' AND created<?").run(Date.now()-7*86400000);
+    if(db.prepare("SELECT count(*) AS n FROM devices WHERE folder=? AND role='pending'").get(folder).n>=64) fail(429);
+    const token=nonce(),id=deviceKey();
+    db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(id,hash(token),folder,nick,'pending',Date.now());
+    return json({token});
+  }
+  const token=req.headers.authorization?.match(/^Bearer ([a-zA-Z0-9_-]{43})$/)?.[1];
+  if(!token) fail(401);
+  const digest=hash(token);
+  const member=db.prepare('SELECT * FROM devices WHERE secret=?').get(digest);
+  if(url.pathname==='/membership' && req.method==='GET' && member) {
+    const requests=member.role==='owner' ? db.prepare("SELECT id,nick FROM devices WHERE folder=? AND role='pending' ORDER BY created").all(member.folder) : [];
+    return json({role:member.role,id:member.id,folder:member.folder,requests,proof:member.role==='pending'?member.secret.slice(-12):''});
+  }
+  if(url.pathname.startsWith('/decision/') && req.method==='POST'){
+    if(member?.role!=='owner') fail(403);
+    const [, ,id,decision]=url.pathname.split('/');
+    if(!['allow','deny'].includes(decision))fail(400);
+    const changed=db.prepare("UPDATE devices SET role=? WHERE id=? AND folder=? AND role='pending'").run(decision==='allow'?'member':'denied',id,member.folder);
+    if(!changed.changes)fail(404);
+    return json({ok:true});
   }
   const parts=url.pathname.split('/');
   if(parts[1]!=='versions' || parts.length>3) fail(404);
-  const token=req.headers.authorization?.match(/^Bearer ([a-zA-Z0-9_-]{43})$/)?.[1];
-  if(!token) fail(401);
-  const group=db.prepare('SELECT * FROM groups WHERE id=?').get(hash(token));
+  if(member && !['owner','member'].includes(member.role))fail(403);
+  const group=member ? db.prepare('SELECT g.* FROM groups g JOIN folder_groups f ON f.grp=g.id WHERE f.folder=?').get(member.folder) : db.prepare('SELECT * FROM groups WHERE id=?').get(digest);
   if(!group) fail(403);
   if(parts.length===2 && req.method==='GET') {
     const rows=db.prepare('SELECT name,author FROM versions WHERE grp=? ORDER BY name DESC').all(group.id);

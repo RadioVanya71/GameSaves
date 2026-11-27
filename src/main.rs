@@ -18,7 +18,10 @@ use std::time::Instant;
 struct App {
     nickname_input: String,
     invitation: String,
-    cloud_list: Option<Receiver<group::Result<Vec<(String, PathBuf)>>>>,
+    cloud_list:
+        Option<Receiver<group::Result<(Option<group::Membership>, Vec<(String, PathBuf)>)>>>,
+    membership: Option<group::Membership>,
+    joining: Option<Receiver<group::Result<String>>>,
     cloud_checked: Option<Instant>,
     cloud_error: String,
     jump_to_history: bool,
@@ -38,8 +41,6 @@ struct App {
     selected: Option<String>,
     save_path: String,
     candidates: Vec<PathBuf>,
-    shared_path: String,
-    world_code: String,
     versions: Vec<(String, PathBuf)>,
     version: Option<PathBuf>,
     restore_confirmation: Option<(PathBuf, PathBuf)>,
@@ -73,10 +74,13 @@ impl App {
         };
         let config_error = setup_error.or(config_error);
         let games = catalog::discover(&settings.custom_games);
-        let shared_path = settings.shared_path.to_string_lossy().into_owned();
-        let network = settings_path
-            .parent()
-            .and_then(|path| peers::Network::start(path.to_path_buf()).ok());
+        let network = demo_mode
+            .then(|| {
+                settings_path
+                    .parent()
+                    .and_then(|path| peers::Network::start(path.to_path_buf()).ok())
+            })
+            .flatten();
         let artwork = artwork::Artwork::new(
             context,
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
@@ -93,6 +97,8 @@ impl App {
             nickname_input: settings.nickname.clone(),
             invitation: String::new(),
             cloud_list: None,
+            membership: None,
+            joining: None,
             cloud_checked: None,
             cloud_error: String::new(),
             jump_to_history: false,
@@ -122,8 +128,6 @@ impl App {
             selected: None,
             save_path: String::new(),
             candidates: Vec::new(),
-            shared_path,
-            world_code: String::new(),
             versions: Vec::new(),
             version: None,
             restore_confirmation: None,
@@ -161,21 +165,6 @@ impl App {
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
         let game = self.games.iter().find(|game| game.id == id);
         self.candidates = game.map(catalog::save_candidates).unwrap_or_default();
-        self.world_code = self
-            .settings
-            .world_codes
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| {
-                game.map_or_else(String::new, |game| {
-                    game.name
-                        .split(|c: char| !c.is_ascii_alphanumeric())
-                        .filter(|word| !word.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("-")
-                        .to_ascii_lowercase()
-                })
-            });
         self.show_setup = !self
             .settings
             .save_paths
@@ -183,6 +172,8 @@ impl App {
             .is_some_and(|path| path.is_file() || path.is_dir())
             || !(self.settings.world_codes.contains_key(&id)
                 || self.settings.groups.contains_key(&id));
+        self.membership = None;
+        self.joining = None;
         self.invitation.clear();
         self.cloud_list = None;
         self.cloud_checked = None;
@@ -245,24 +236,22 @@ impl App {
     }
 
     fn world_with_code(&self, code: &str) -> Option<peers::World> {
-        let shared = snapshots::world_directory(&self.settings.shared_path, code).ok()?;
+        if !self.demo_mode {
+            return None;
+        }
+        let shared = snapshots::world_directory(&self.demo.root.join("shared"), code).ok()?;
         peers::World::new(shared, self.settings_path.parent()?)
     }
 
     fn world(&self) -> Option<peers::World> {
-        let code = self.settings.world_codes.get(self.selected.as_ref()?)?;
-        self.world_with_code(code)
+        (self.selected.as_deref() == Some(demo::GAME_ID))
+            .then(|| self.world_with_code(demo::WORLD_CODE))
+            .flatten()
     }
 
     fn configure_network(&self) {
         if let Some(network) = &self.network {
-            network.configure(
-                self.settings
-                    .world_codes
-                    .values()
-                    .filter_map(|code| self.world_with_code(code))
-                    .collect(),
-            );
+            network.configure(self.world_with_code(demo::WORLD_CODE).into_iter().collect());
         }
     }
 
@@ -316,7 +305,8 @@ impl App {
         if let Some(rx) = &self.cloud_list {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok(rows)) => {
+                Ok(Ok((membership, rows))) => {
+                    self.membership = membership;
                     self.version = self
                         .version
                         .take()
@@ -343,38 +333,25 @@ impl App {
         self.cloud_checked = Some(Instant::now());
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(group.list());
+            let result = (|| {
+                let membership = if group.device {
+                    Some(group.membership()?)
+                } else {
+                    None
+                };
+                let authorized = membership
+                    .as_ref()
+                    .is_none_or(|m| matches!(m.role.as_str(), "owner" | "member"));
+                let rows = if authorized {
+                    group.list()?
+                } else {
+                    Vec::new()
+                };
+                Ok((membership, rows))
+            })();
+            let _ = tx.send(result);
             context.request_repaint();
         });
-    }
-
-    fn sync_settings(&mut self, id: &str) {
-        let shared = PathBuf::from(self.shared_path.trim());
-        let code = self.world_code.trim();
-        if !shared.is_dir() {
-            self.status = "Выбери существующую общую папку.".into();
-            return;
-        }
-        if let Err(error) = snapshots::world_directory(&shared, code) {
-            self.status = error.to_string();
-            return;
-        }
-        let mut updated = self.settings.clone();
-        updated.shared_path = shared;
-        updated.world_codes.insert(id.to_owned(), code.to_owned());
-        if let Err(error) = updated.write(&self.settings_path) {
-            self.status = format!("Не удалось запомнить общую папку. {error}");
-            return;
-        }
-        self.settings = updated;
-        self.configure_network();
-        self.show_setup = !self
-            .settings
-            .save_paths
-            .get(id)
-            .is_some_and(|path| path.is_file() || path.is_dir());
-        self.status = "Общая папка подключена.".into();
-        self.refresh_versions();
     }
 
     fn start_job(
