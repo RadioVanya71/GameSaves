@@ -2,6 +2,7 @@
 
 mod artwork;
 mod catalog;
+mod demo;
 mod peers;
 mod snapshots;
 mod ui;
@@ -13,6 +14,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 struct App {
+    demo: demo::Demo,
+    friend_window: Option<std::process::Child>,
+    demo_level: String,
     settings: Settings,
     settings_path: PathBuf,
     config_error: Option<String>,
@@ -39,11 +43,20 @@ struct App {
 
 impl App {
     fn new(context: &egui::Context) -> Self {
-        let settings_path = catalog::settings_path();
+        let demo = demo::Demo::new(
+            catalog::settings_path().with_file_name("demo"),
+            std::env::args_os().any(|arg| arg == "--friend"),
+        );
+        let setup_error = demo
+            .prepare()
+            .err()
+            .map(|e| format!("Не удалось подготовить демоигру. {e}"));
+        let settings_path = demo.settings_path();
         let (settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
+        let config_error = setup_error.or(config_error);
         let games = catalog::discover(&settings.custom_games);
         let shared_path = settings.shared_path.to_string_lossy().into_owned();
         let network = settings_path
@@ -54,6 +67,9 @@ impl App {
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
         let mut app = Self {
+            demo,
+            friend_window: None,
+            demo_level: String::new(),
             settings,
             settings_path,
             config_error,
@@ -81,7 +97,7 @@ impl App {
         let initial = app
             .games
             .iter()
-            .find(|game| app.settings.save_paths.contains_key(&game.id))
+            .find(|game| game.id == demo::GAME_ID)
             .or_else(|| app.games.first())
             .map(|game| game.id.clone());
         if let Some(id) = initial {
@@ -198,6 +214,13 @@ impl App {
 
     fn refresh_versions(&mut self) {
         self.last_refresh = Instant::now();
+        if self.selected.as_deref() == Some(demo::GAME_ID) {
+            self.demo_level = self
+                .demo
+                .level()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "неизвестен".into());
+        }
         let inspect_older = self
             .version
             .as_ref()
@@ -330,7 +353,11 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "GameSaves",
+        if std::env::args_os().any(|arg| arg == "--friend") {
+            "GameSaves Demo · Друг"
+        } else {
+            "GameSaves Demo · Игрок"
+        },
         options,
         Box::new(|creation| {
             ui::configure(&creation.egui_ctx);

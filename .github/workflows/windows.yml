@@ -1,8 +1,8 @@
-name: Windows build
+name: Windows demo build
 
 on:
   push:
-    branches: [main]
+    branches: [demo]
     paths:
       - '.github/workflows/windows.yml'
       - 'Cargo.toml'
@@ -39,6 +39,6 @@ jobs:
           Copy-Item target/release/game-saves.exe, README.md, src/fonts/OpenSans-LICENSE.txt -Destination dist
       - uses: actions/upload-artifact@v4
         with:
-          name: GameSaves-windows-x64
+          name: GameSaves-demo-windows-x64
           path: dist/
           if-no-files-found: error

@@ -292,6 +292,58 @@ impl App {
         }
     }
 
+    fn demo_controls(&mut self, ui: &mut egui::Ui) {
+        panel().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let friend = self.demo.profile == "friend";
+            ui.label(heading(
+                if friend {
+                    "Тестовый профиль друга"
+                } else {
+                    "Тестовый профиль игрока"
+                },
+                22.0,
+            ));
+            ui.label(format!("Уровень в демоигре — {}", self.demo_level));
+            muted(
+                ui,
+                "Повысь уровень и отправь сохранение. Затем восстанови версию и проверь уровень.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Пройти уровень").clicked() {
+                    match self.demo.advance() {
+                        Ok(()) => self.refresh_versions(),
+                        Err(e) => self.status = format!("Не удалось изменить демосохранение. {e}"),
+                    }
+                }
+                if !friend {
+                    let opened = self
+                        .friend_window
+                        .as_mut()
+                        .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+                    if ui
+                        .add_enabled(
+                            !opened,
+                            egui::Button::new(if opened {
+                                "Окно друга открыто"
+                            } else {
+                                "Открыть окно друга"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        match std::env::current_exe()
+                            .and_then(|exe| std::process::Command::new(exe).arg("--friend").spawn())
+                        {
+                            Ok(child) => self.friend_window = Some(child),
+                            Err(e) => self.status = format!("Не удалось открыть окно друга. {e}"),
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     fn game_header(&mut self, ui: &mut egui::Ui, game: &Game) {
         let art = self.artwork.get(
             game,
@@ -717,6 +769,9 @@ impl App {
                         if let Some(game) = game {
                             ui.add_enabled_ui(idle, |ui| {
                                 self.game_header(ui, &game);
+                                if game.id == crate::demo::GAME_ID {
+                                    self.demo_controls(ui);
+                                }
                                 ui.add_space(8.0);
                                 if self.show_setup {
                                     self.setup(ui, &game);
