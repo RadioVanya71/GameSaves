@@ -30,29 +30,6 @@ impl Client {
         client.valid().then_some(client)
     }
 
-    #[cfg(any(windows, test))]
-    pub fn load(path: &std::path::Path) -> Result<Self> {
-        #[derive(Deserialize)]
-        struct Registration {
-            installed: Client,
-        }
-        let file = std::fs::File::open(path).map_err(super::error)?;
-        let mut data = Vec::new();
-        file.take(16385)
-            .read_to_end(&mut data)
-            .map_err(super::error)?;
-        if data.len() > 16384 {
-            return Err("Файл регистрации слишком большой.".into());
-        }
-        let client = serde_json::from_slice::<Registration>(&data)
-            .map_err(|_| "Нужен JSON регистрации Google типа «Приложение для компьютера».")?
-            .installed;
-        if !client.valid() {
-            return Err("Некорректная регистрация приложения Google.".into());
-        }
-        Ok(client)
-    }
-
     fn valid(&self) -> bool {
         self.client_id.ends_with(".apps.googleusercontent.com")
             && !self.client_secret.trim().is_empty()
@@ -68,7 +45,7 @@ impl Client {
         let result = match response {
             Ok(response) => json(response),
             Err(ureq::Error::StatusCode(400 | 401)) => {
-                Err("Google не принял код входа. Подключи Диск заново и выбери аккаунт из списка тестировщиков.".into())
+                Err("Google не принял код входа. Подключи Диск заново и выбери аккаунт, у которого есть доступ к папке.".into())
             }
             Err(e) => Err(super::request_error(e)),
         };
@@ -258,15 +235,6 @@ mod tests {
         let error = wait_for_choice(listener, "", "", &cancelled).unwrap_err();
         assert!(error.contains("отменено"));
         assert!(TcpListener::bind(address).is_ok());
-    }
-
-    #[test]
-    fn desktop_registration_imports_only_the_installed_client() {
-        let path = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(path.path(), br#"{"web":{"client_id":"client.apps.googleusercontent.com","client_secret":"fixture"}}"#).unwrap();
-        assert!(Client::load(path.path()).is_err());
-        std::fs::write(path.path(), br#"{"installed":{"client_id":"client.apps.googleusercontent.com","client_secret":"fixture"}}"#).unwrap();
-        assert!(Client::load(path.path()).is_ok());
     }
 
     #[test]

@@ -2,9 +2,7 @@
 
 mod artwork;
 mod catalog;
-mod demo;
 mod drive;
-mod peers;
 mod snapshots;
 mod ui;
 mod world_folder;
@@ -32,10 +30,6 @@ struct App {
     cloud_checked: Option<Instant>,
     cloud_error: String,
     jump_to_history: bool,
-    demo: demo::Demo,
-    demo_mode: bool,
-    friend_window: Option<std::process::Child>,
-    demo_level: String,
     settings: Settings,
     settings_path: PathBuf,
     config_error: Option<String>,
@@ -51,8 +45,6 @@ struct App {
     version: Option<PathBuf>,
     restore_confirmation: Option<(PathBuf, PathBuf)>,
     job: Option<Receiver<Result<String, String>>>,
-    network: Option<peers::Network>,
-    last_refresh: Instant,
     saves_checked: Instant,
     new_game_name: String,
     new_game_dir: String,
@@ -61,53 +53,24 @@ struct App {
 
 impl App {
     fn new(context: &egui::Context) -> Self {
-        let demo = demo::Demo::new(
-            catalog::settings_path().with_file_name("demo"),
-            std::env::args_os().any(|arg| arg == "--friend"),
-        );
-        let demo_mode = std::env::args_os().any(|a| a == "--demo" || a == "--friend");
-        let setup_error = demo_mode
-            .then(|| demo.prepare().err())
-            .flatten()
-            .map(|e| format!("Не удалось подготовить демоигру. {e}"));
-        let settings_path = if demo_mode {
-            demo.settings_path()
-        } else {
-            catalog::settings_path()
-        };
+        let settings_path = catalog::settings_path();
         let (mut settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
-        let config_error = setup_error.or(config_error);
         let games = catalog::discover(&settings.custom_games);
-        let network = demo_mode
-            .then(|| {
-                settings_path
-                    .parent()
-                    .and_then(|path| peers::Network::start(path.to_path_buf()).ok())
-            })
-            .flatten();
         let artwork = artwork::Artwork::new(
             context,
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
         if !snapshots::valid_nickname(&settings.nickname) {
-            settings.nickname = if demo.profile == "friend" {
-                "Друг"
-            } else {
-                "Игрок"
-            }
-            .into();
+            settings.nickname = "Игрок".into();
         }
-        let (drive, drive_error) = if demo_mode {
-            (None, String::new())
-        } else {
+        let (drive, drive_error) =
             match drive::load(&settings_path.with_file_name("google-drive.dat")) {
                 Ok(drive) => (drive, String::new()),
                 Err(e) => (None, e),
-            }
-        };
+            };
         let mut app = Self {
             nickname_input: settings.nickname.clone(),
             drive,
@@ -116,10 +79,6 @@ impl App {
             cloud_checked: None,
             cloud_error: drive_error,
             jump_to_history: false,
-            demo,
-            demo_mode,
-            friend_window: None,
-            demo_level: String::new(),
             settings,
             settings_path,
             config_error,
@@ -135,24 +94,15 @@ impl App {
             version: None,
             restore_confirmation: None,
             job: None,
-            network,
-            last_refresh: Instant::now(),
             saves_checked: Instant::now(),
             new_game_name: String::new(),
             new_game_dir: String::new(),
             status: String::new(),
         };
-        app.configure_network();
         let initial = app
             .games
             .iter()
-            .find(|game| {
-                if demo_mode {
-                    game.id == demo::GAME_ID
-                } else {
-                    app.settings.save_paths.contains_key(&game.id)
-                }
-            })
+            .find(|game| app.settings.save_paths.contains_key(&game.id))
             .or_else(|| app.games.first())
             .map(|game| game.id.clone());
         if let Some(id) = initial {
@@ -176,7 +126,6 @@ impl App {
         self.selected = Some(id);
         self.scan_saves();
         self.status.clear();
-        self.refresh_versions();
     }
 
     fn add_game(&mut self) {
@@ -244,67 +193,6 @@ impl App {
                 self.status = format!("Не удалось сохранить путь. {error}");
             }
         }
-    }
-
-    fn world_with_code(&self, code: &str) -> Option<peers::World> {
-        if !self.demo_mode {
-            return None;
-        }
-        let shared = snapshots::world_directory(&self.demo.root.join("shared"), code).ok()?;
-        peers::World::new(shared, self.settings_path.parent()?)
-    }
-
-    fn world(&self) -> Option<peers::World> {
-        (self.selected.as_deref() == Some(demo::GAME_ID))
-            .then(|| self.world_with_code(demo::WORLD_CODE))
-            .flatten()
-    }
-
-    fn configure_network(&self) {
-        if let Some(network) = &self.network {
-            network.configure(self.world_with_code(demo::WORLD_CODE).into_iter().collect());
-        }
-    }
-
-    fn refresh_versions(&mut self) {
-        self.last_refresh = Instant::now();
-        if self.selected.as_deref() == Some(demo::GAME_ID) {
-            self.demo_level = self
-                .demo
-                .level()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "неизвестен".into());
-        }
-        if self.drive.is_some() {
-            return;
-        }
-        let inspect_older = self
-            .version
-            .as_ref()
-            .filter(|path| {
-                self.versions
-                    .first()
-                    .is_some_and(|(_, latest)| *path != latest)
-            })
-            .cloned();
-        self.versions = self
-            .world()
-            .map(|world| {
-                let local = snapshots::versions(&world.local).unwrap_or_default();
-                let shared = snapshots::versions(&world.shared).unwrap_or_default();
-                let mut seen = std::collections::HashSet::new();
-                let mut versions: Vec<_> = local
-                    .into_iter()
-                    .chain(shared)
-                    .filter(|(_, path)| seen.insert(path.file_name().map(|name| name.to_owned())))
-                    .collect();
-                versions.sort_by(|left, right| right.1.file_name().cmp(&left.1.file_name()));
-                versions
-            })
-            .unwrap_or_default();
-        self.version = inspect_older
-            .filter(|path| self.versions.iter().any(|(_, current)| current == path))
-            .or_else(|| self.versions.first().map(|(_, path)| path.clone()));
     }
 
     fn start_drive_connection(&mut self, client: drive::Client, ctx: &egui::Context) {
@@ -447,7 +335,6 @@ impl App {
         self.job = None;
         self.cloud_list = None;
         self.cloud_checked = None;
-        self.refresh_versions();
     }
 
     fn confirm_restore(&mut self, ctx: &egui::Context) {
@@ -470,21 +357,16 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Восстановить").clicked() {
                         self.restore_confirmation = None;
-                        let drive = self.drive.clone();
-                        self.start_job(ctx, move || {
-                            match drive {
-                                Some(drive) => drive.restore(&version, &destination),
-                                None => snapshots::restore(&version, &destination)
-                                    .map_err(|e| e.to_string()),
-                            }
-                            .map(|backup| {
-                                format!(
-                                    "Сохранение восстановлено. Резервная копия: {}",
-                                    backup.display()
-                                )
-                            })
-                            .map_err(|error| error.to_string())
-                        });
+                        if let Some(drive) = self.drive.clone() {
+                            self.start_job(ctx, move || {
+                                drive.restore(&version, &destination).map(|backup| {
+                                    format!(
+                                        "Сохранение восстановлено. Резервная копия: {}",
+                                        backup.display()
+                                    )
+                                })
+                            });
+                        }
                     }
                     if ui.button("Отмена").clicked() {
                         self.restore_confirmation = None;
@@ -502,13 +384,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        if std::env::args_os().any(|arg| arg == "--friend") {
-            "GameSaves Demo · Друг"
-        } else if std::env::args_os().any(|arg| arg == "--demo") {
-            "GameSaves Demo · Игрок"
-        } else {
-            "GameSaves"
-        },
+        "GameSaves",
         options,
         Box::new(|creation| {
             ui::configure(&creation.egui_ctx);

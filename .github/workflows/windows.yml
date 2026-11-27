@@ -2,14 +2,14 @@ name: Windows build
 
 on:
   push:
-    branches: [main, direct-drive]
+    branches: [main, release-0.7]
     paths:
       - '.github/workflows/windows.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/**'
-      - 'relay/**'
       - 'README.md'
+      - 'RELEASE.md'
   workflow_dispatch:
 
 permissions:
@@ -27,10 +27,6 @@ jobs:
       - name: Install Rust 1.100.0
         shell: pwsh
         run: rustup toolchain install 1.100.0 --profile minimal
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: node --test relay/protocol.test.mjs
       - name: Run tests
         shell: pwsh
         run: cargo +1.100.0 test --locked
@@ -39,7 +35,14 @@ jobs:
           GAMESAVES_GOOGLE_CLIENT_ID: ${{ vars.GAMESAVES_GOOGLE_CLIENT_ID }}
           GAMESAVES_GOOGLE_CLIENT_SECRET: ${{ secrets.GAMESAVES_GOOGLE_CLIENT_SECRET }}
         shell: pwsh
-        run: cargo +1.100.0 build --locked --release
+        run: |
+          if ($env:GITHUB_REF -eq 'refs/heads/main' -and (git log -1 --format=%s) -like 'Release GameSaves *') {
+            if ($env:GAMESAVES_GOOGLE_CLIENT_ID -notmatch '^[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$' -or
+                [string]::IsNullOrWhiteSpace($env:GAMESAVES_GOOGLE_CLIENT_SECRET)) {
+              throw 'Public release requires the GameSaves Google Desktop OAuth client in GitHub Actions settings.'
+            }
+          }
+          cargo +1.100.0 build --locked --release
       - name: Bundle Windows build
         shell: pwsh
         run: |
