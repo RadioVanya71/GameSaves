@@ -221,12 +221,12 @@ impl App {
 
     fn start_archive_selection(&mut self, game: &Game, ctx: &egui::Context) {
         if let Some(drive) = self.drive.clone() {
-            let key = drive::game_key(game);
+            let game = game.clone();
             self.start_drive_selection(ctx, true, move |cancelled| {
-                let (drive, count) = drive.add_archives(&key, cancelled)?;
+                let (drive, count, folders) = drive.add_archives(&game, cancelled)?;
                 Ok((
                     drive,
-                    format!("Выбрано архивов: {count}. Обновляю историю."),
+                    format!("Выбрано архивов: {count}, папок: {folders}. Обновляю историю."),
                 ))
             });
         }
@@ -352,10 +352,10 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.cloud_list = Some(rx);
         self.cloud_checked = Some(Instant::now());
-        let key = drive::game_key(game);
+        let game = game.clone();
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(drive.list(&key));
+            let _ = tx.send(drive.list(&game));
             context.request_repaint();
         });
     }

@@ -125,7 +125,8 @@ pub fn authorize(
         Selection::Archives => {
             url.query_pairs_mut()
                 .append_pair("allow_multiple", "true")
-                .append_pair("mimetypes", "application/zip,application/x-zip-compressed");
+                .append_pair("allow_folder_selection", "true")
+                .append_pair("mimetypes", "application/zip,application/x-zip-compressed,application/vnd.google-apps.folder");
         }
     }
     check_cancelled(cancelled)?;

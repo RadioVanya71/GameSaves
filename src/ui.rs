@@ -491,7 +491,7 @@ impl App {
                     let author = self.settings.nickname.clone();
                     if let (Some(drive), Some(source)) = (drive, ready_save.as_ref()) {
                         let source = source.clone();
-                        let game = crate::drive::game_key(game);
+                        let game = game.clone();
                         self.start_job(ui.ctx(), move || drive.send(&game, &source, &author));
                     }
                 }
@@ -510,7 +510,7 @@ impl App {
             if self.drive.is_some() {
                 let selecting = self.connect_drive.as_ref().is_some_and(|pending| pending.selecting_archives);
                 if selecting {
-                    muted(ui, "Выбери архивы из общей папки в окне Google.");
+                    muted(ui, "Выбери подпапку игры или её архивы в окне Google.");
                     if ui.button("Отменить").clicked() { self.cancel_drive_connection(); }
                 } else if ui.add_enabled(self.connect_drive.is_none(), egui::Button::new("Добавить архивы с Диска")).clicked() {
                     self.start_archive_selection(game, ui.ctx());

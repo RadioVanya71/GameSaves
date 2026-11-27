@@ -133,7 +133,7 @@ impl Drive {
         Ok(token)
     }
 
-    pub fn send(&self, game: &str, source: &Path, author: &str) -> Result<String> {
+    pub fn send(&self, game: &Game, source: &Path, author: &str) -> Result<String> {
         let temp = tempfile::tempdir().map_err(error)?;
         let path = snapshots::publish(source, temp.path(), author).map_err(error)?;
         let archive = File::open(&path).map_err(error)?;
@@ -145,13 +145,15 @@ impl Drive {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or("Не удалось назвать архив.")?;
+        let key = game_key(game);
+        let token = self.token()?;
+        let parent = self.upload_folder(&token, &key, &game_folder_name(game))?;
         let metadata = serde_json::json!({
             "name": name,
-            "parents": [self.folder.id],
+            "parents": [parent],
             "mimeType": "application/zip",
-            "appProperties": {"gamesaves": game, "author": author},
+            "appProperties": {"gamesaves": key, "author": author},
         });
-        let token = self.token()?;
         let agent = http(600);
         let session = agent
             .post(format!(
@@ -188,11 +190,75 @@ impl Drive {
         Ok("Сохранение загружено на Google Диск.".into())
     }
 
+    fn game_folders(
+        &self,
+        agent: &ureq::Agent,
+        token: &str,
+        game: &str,
+        title: &str,
+    ) -> Result<Vec<RemoteFile>> {
+        let url = game_folders_url(&self.folder.id, game, title)?;
+        let mut folders: Vec<_> = request_files(agent, token, url)?
+            .into_iter()
+            .filter(|file| {
+                file.mime_type == FOLDER
+                    && valid_id(&file.id)
+                    && file
+                        .app_properties
+                        .get("gamesaves")
+                        .is_none_or(|tag| tag == game)
+            })
+            .collect();
+        // Prefer a marked folder over a manually created folder of the same name.
+        folders.sort_unstable_by(|a, b| {
+            b.app_properties
+                .contains_key("gamesaves")
+                .cmp(&a.app_properties.contains_key("gamesaves"))
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(folders)
+    }
+
+    fn upload_folder(&self, token: &str, game: &str, title: &str) -> Result<String> {
+        let agent = http(30);
+        if let Some(folder) = self
+            .game_folders(&agent, token, game, title)?
+            .into_iter()
+            .next()
+        {
+            return Ok(folder.id);
+        }
+        let data = serde_json::json!({
+            "name": title,
+            "mimeType": FOLDER,
+            "parents": [self.folder.id],
+            "appProperties": {"gamesaves": game},
+        });
+        #[derive(Deserialize)]
+        struct Created {
+            id: String,
+        }
+        let folder: Created = json(
+            agent
+                .post(format!("{FILES}?supportsAllDrives=true&fields=id"))
+                .header("Authorization", bearer(token))
+                .header("Content-Type", "application/json")
+                .send(data.to_string().as_bytes())
+                .map_err(request_error)?,
+        )?;
+        if !valid_id(&folder.id) {
+            return Err("Google не подтвердил создание папки игры.".into());
+        }
+        Ok(folder.id)
+    }
+
     pub fn add_archives(
         mut self,
-        game: &str,
+        game: &Game,
         cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<(Self, usize)> {
+    ) -> Result<(Self, usize, usize)> {
+        let title = game_folder_name(game);
+        let game = game_key(game);
         let current = self.token()?;
         let (tokens, ids) = oauth::authorize(&self.client, oauth::Selection::Archives, cancelled)?;
         oauth::check_cancelled(cancelled)?;
@@ -219,31 +285,45 @@ impl Drive {
         if account(&current)? != account(&tokens.access_token)? {
             return Err("Выбери тот же Google-аккаунт, которым подключена папка.".into());
         }
+        let parents: std::collections::HashSet<_> = self
+            .game_folders(&agent, &tokens.access_token, &game, &title)?
+            .into_iter()
+            .map(|folder| folder.id)
+            .chain(std::iter::once(self.folder.id.clone()))
+            .collect();
         let mut selected = std::collections::BTreeSet::new();
+        let mut folders_selected = 0;
         for id in ids {
             oauth::check_cancelled(cancelled)?;
-            let remote: RemoteFile = json(agent.get(format!("{FILES}/{id}?supportsAllDrives=true&fields=id,name,parents,appProperties,trashed"))
+            let remote: RemoteFile = json(agent.get(format!("{FILES}/{id}?supportsAllDrives=true&fields=id,name,mimeType,parents,appProperties,trashed"))
                 .header("Authorization", bearer(&tokens.access_token)).call().map_err(request_error)?)?;
-            if !remote.trashed
-                && remote.id == id
-                && remote.parents.contains(&self.folder.id)
+            if remote.trashed || remote.id != id {
+                continue;
+            }
+            if remote.mime_type == FOLDER {
+                if remote.id != self.folder.id && parents.contains(&remote.id) {
+                    folders_selected += 1;
+                }
+            } else if remote.parents.iter().any(|id| parents.contains(id))
                 && remote
                     .app_properties
                     .get("gamesaves")
-                    .is_none_or(|tag| tag == game)
+                    .is_none_or(|tag| tag == &game)
                 && snapshots::version_timestamp(&remote.name).is_some()
             {
                 selected.insert(remote.id);
             }
         }
-        if selected.is_empty() {
-            return Err("Выбери ZIP-архивы GameSaves для этой игры из подключённой папки.".into());
+        if selected.is_empty() && folders_selected == 0 {
+            return Err("Выбери ZIP этой игры или её подпапку внутри подключённой папки. Если подпапка не была подключена, выбери её вместе с архивами.".into());
         }
         let count = selected.len();
-        self.selected_archives
-            .entry(game.into())
-            .or_default()
-            .extend(selected);
+        if count > 0 {
+            self.selected_archives
+                .entry(game)
+                .or_default()
+                .extend(selected);
+        }
         if let Some(refresh) = tokens.refresh_token {
             self.refresh = refresh;
         }
@@ -251,51 +331,30 @@ impl Drive {
             tokens.access_token,
             tokens.expires_in,
         ))));
-        Ok((self, count))
+        Ok((self, count, folders_selected))
     }
 
-    pub fn list(&self, game: &str) -> Result<Vec<(String, PathBuf)>> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Page {
-            #[serde(default)]
-            files: Vec<RemoteFile>,
-            next_page_token: Option<String>,
-        }
+    pub fn list(&self, game: &Game) -> Result<Vec<(String, PathBuf)>> {
         let token = self.token()?;
         let agent = http(30);
-        let mut page_token: Option<String> = None;
-        let mut seen = std::collections::HashSet::new();
-        let mut rows = Vec::new();
+        let title = game_folder_name(game);
+        let game = game_key(game);
+        let mut parents = vec![self.folder.id.clone()];
+        parents.extend(
+            self.game_folders(&agent, &token, &game, &title)?
+                .into_iter()
+                .map(|folder| folder.id),
+        );
         let explicit = self
             .selected_archives
-            .get(game)
+            .get(&game)
             .filter(|ids| !ids.is_empty());
-        loop {
-            let mut url = list_url(&self.folder.id, explicit.is_none().then_some(game))?;
-            if let Some(next) = &page_token {
-                url.query_pairs_mut().append_pair("pageToken", next);
-            }
-            let response = agent
-                .get(url.as_str())
-                .header("Authorization", bearer(&token))
-                .call()
-                .map_err(request_error)?;
-            let page: Page = json(response)?;
-            rows.extend(
-                page.files
-                    .into_iter()
-                    .filter(|file| file.matches_game(game, explicit))
-                    .filter_map(RemoteFile::row),
-            );
-            match page.next_page_token {
-                Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
-                    page_token = Some(next)
-                }
-                Some(_) => return Err("Google прислал повторяющуюся страницу истории.".into()),
-                None => break,
-            }
-        }
+        let url = list_url(&parents, explicit.is_none().then_some(game.as_str()))?;
+        let mut rows: Vec<_> = request_files(&agent, &token, url)?
+            .into_iter()
+            .filter(|file| file.matches_game(&game, explicit))
+            .filter_map(RemoteFile::row)
+            .collect();
         rows.sort_unstable_by(|a, b| {
             b.1.file_name()
                 .cmp(&a.1.file_name())
@@ -341,24 +400,95 @@ impl Drive {
     }
 }
 
-fn list_url(folder: &str, game: Option<&str>) -> Result<Url> {
-    if !valid_id(folder) || game.is_some_and(|key| !valid_id(key)) {
+fn request_files(agent: &ureq::Agent, token: &str, url: Url) -> Result<Vec<RemoteFile>> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Page {
+        #[serde(default)]
+        files: Vec<RemoteFile>,
+        next_page_token: Option<String>,
+    }
+    let mut files = Vec::new();
+    let mut page_url = url.clone();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page: Page = json(
+            agent
+                .get(page_url.as_str())
+                .header("Authorization", bearer(token))
+                .call()
+                .map_err(request_error)?,
+        )?;
+        files.extend(page.files);
+        match page.next_page_token {
+            Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
+                page_url = url.clone();
+                page_url.query_pairs_mut().append_pair("pageToken", &next);
+            }
+            Some(_) => return Err("Google прислал повторяющуюся страницу истории.".into()),
+            None => return Ok(files),
+        }
+    }
+}
+
+fn list_url(folders: &[String], game: Option<&str>) -> Result<Url> {
+    if folders.is_empty()
+        || !folders.iter().all(|id| valid_id(id))
+        || game.is_some_and(|key| !valid_id(key))
+    {
         return Err("Некорректный идентификатор папки или игры.".into());
     }
-    let mut query = format!("'{folder}' in parents and trashed = false");
+    let parents = folders
+        .iter()
+        .map(|id| format!("'{id}' in parents"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let mut query = format!("({parents}) and trashed = false");
     if let Some(game) = game {
         query.push_str(&format!(
             " and appProperties has {{ key='gamesaves' and value='{game}' }}"
         ));
     }
+    Ok(list_parameters(&query))
+}
+
+fn game_folders_url(parent: &str, game: &str, title: &str) -> Result<Url> {
+    if !valid_id(parent) || !valid_id(game) {
+        return Err("Некорректный идентификатор папки или игры.".into());
+    }
+    let title = title.replace('\\', "\\\\").replace('\'', "\\'");
+    Ok(list_parameters(&format!(
+        "'{parent}' in parents and trashed = false and mimeType = '{FOLDER}' and (appProperties has {{ key='gamesaves' and value='{game}' }} or name = '{title}')"
+    )))
+}
+
+fn list_parameters(query: &str) -> Url {
     let mut url = Url::parse(FILES).unwrap();
     url.query_pairs_mut()
-        .append_pair("q", &query)
-        .append_pair("fields", "nextPageToken,files(id,name,appProperties)")
+        .append_pair("q", query)
+        .append_pair(
+            "fields",
+            "nextPageToken,files(id,name,mimeType,appProperties)",
+        )
         .append_pair("pageSize", "100")
         .append_pair("supportsAllDrives", "true")
         .append_pair("includeItemsFromAllDrives", "true");
-    Ok(url)
+    url
+}
+
+fn game_folder_name(game: &Game) -> String {
+    let title: String = game
+        .name
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if matches!(c, '/' | '\\') { '–' } else { c })
+        .take(180)
+        .collect();
+    if title.trim().is_empty() {
+        return "Игра".into();
+    }
+    title.trim().into()
 }
 
 #[derive(Deserialize)]
@@ -366,6 +496,8 @@ fn list_url(folder: &str, game: Option<&str>) -> Result<Url> {
 struct RemoteFile {
     id: String,
     name: String,
+    #[serde(default)]
+    mime_type: String,
     #[serde(default)]
     parents: Vec<String>,
     #[serde(default)]
@@ -597,15 +729,28 @@ mod tests {
         }
     }
     #[test]
+    fn game_folder_lookup_uses_the_connected_parent_and_escapes_titles() -> Result<()> {
+        assert!(game_folders_url("../outside", "game", "A game").is_err());
+        let url = game_folders_url("shared-saves", "game-key", "King's Quest")?;
+        let (_, query) = url.query_pairs().find(|(key, _)| key == "q").unwrap();
+        assert!(query.contains("'shared-saves' in parents and trashed = false"));
+        assert!(query.contains(FOLDER));
+        assert!(query.contains("value='game-key'"));
+        assert!(query.contains("name = 'King\\'s Quest'"));
+        Ok(())
+    }
+
+    #[test]
     fn history_request_and_rows_use_safe_ids() -> Result<()> {
-        assert!(list_url("../../outside", Some("game")).is_err());
-        let url = list_url("folder", Some("game"))?;
+        assert!(list_url(&["../../outside".into()], Some("game")).is_err());
+        let url = list_url(&["folder".into(), "game-folder".into()], Some("game"))?;
         assert!(url.query_pairs().any(|(key, value)| key == "q"
-            && value.contains("'folder' in parents")
+            && value.contains("'folder' in parents or 'game-folder' in parents")
             && value.contains("value='game'")));
         let row = RemoteFile {
             id: "download-id".into(),
             name: "save-001234567890123-ver.zip".into(),
+            mime_type: "application/zip".into(),
             parents: vec![],
             trashed: false,
             app_properties: [("author".into(), "Ваня".into())].into(),
