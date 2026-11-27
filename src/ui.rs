@@ -3,15 +3,19 @@ use eframe::egui::{self, Color32, FontId, RichText, Stroke, pos2, vec2};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const BACKGROUND: Color32 = Color32::from_rgb(246, 247, 243);
+const BACKGROUND: Color32 = Color32::from_rgb(248, 250, 252);
 const SIDEBAR: Color32 = Color32::WHITE;
 const PANEL: Color32 = Color32::WHITE;
-const BORDER: Color32 = Color32::from_rgb(195, 205, 197);
-const TEXT: Color32 = Color32::from_rgb(24, 41, 34);
-const MUTED: Color32 = Color32::from_rgb(75, 93, 82);
-const GREEN: Color32 = Color32::from_rgb(17, 91, 66);
-const ACTIVE: Color32 = Color32::from_rgb(221, 239, 226);
-const ALERT: Color32 = Color32::from_rgb(151, 56, 27);
+const BORDER: Color32 = Color32::from_rgb(190, 201, 216);
+const TEXT: Color32 = Color32::from_rgb(30, 41, 59);
+const MUTED: Color32 = Color32::from_rgb(71, 85, 105);
+const ACCENT: Color32 = Color32::from_rgb(37, 99, 235);
+const ACTIVE: Color32 = Color32::from_rgb(233, 239, 252);
+const ALERT: Color32 = Color32::from_rgb(165, 37, 28);
+
+const HERO: Color32 = Color32::from_rgb(22, 36, 66);
+const ON_HERO: Color32 = Color32::from_rgb(222, 233, 255);
+const ORANGE: Color32 = Color32::from_rgb(255, 168, 91);
 
 fn semibold(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name("Semibold".into()))
@@ -58,15 +62,15 @@ pub fn configure(ctx: &egui::Context) {
     style.visuals.override_text_color = Some(TEXT);
     style.visuals.weak_text_color = Some(MUTED);
     style.visuals.selection.bg_fill = ACTIVE;
-    style.visuals.selection.stroke = Stroke::new(1.5_f32, GREEN);
-    style.visuals.hyperlink_color = GREEN;
+    style.visuals.selection.stroke = Stroke::new(1.5_f32, ACCENT);
+    style.visuals.hyperlink_color = ACCENT;
     style.visuals.disabled_alpha = 0.68;
     style.visuals.window_stroke = Stroke::new(1.0_f32, BORDER);
     style.visuals.window_corner_radius = 14.into();
     style.spacing.window_margin = egui::Margin::same(22);
-    style.spacing.item_spacing = vec2(10.0, 10.0);
+    style.spacing.item_spacing = vec2(8.0, 8.0);
     style.spacing.button_padding = vec2(15.0, 8.0);
-    style.spacing.interact_size.y = 42.0;
+    style.spacing.interact_size.y = 44.0;
     for (role, font) in [
         (egui::TextStyle::Small, FontId::proportional(15.0)),
         (egui::TextStyle::Body, FontId::proportional(17.0)),
@@ -78,8 +82,8 @@ pub fn configure(ctx: &egui::Context) {
     style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
     for (widget, color, border) in [
         (&mut style.visuals.widgets.inactive, PANEL, BORDER),
-        (&mut style.visuals.widgets.hovered, ACTIVE, GREEN),
-        (&mut style.visuals.widgets.active, ACTIVE, GREEN),
+        (&mut style.visuals.widgets.hovered, ACTIVE, ACCENT),
+        (&mut style.visuals.widgets.active, ACTIVE, ACCENT),
     ] {
         widget.corner_radius = 8.into();
         widget.bg_stroke = Stroke::new(1.0_f32, border);
@@ -91,16 +95,27 @@ pub fn configure(ctx: &egui::Context) {
     ctx.set_style_of(egui::Theme::Dark, style);
 }
 
-fn primary(label: &str) -> egui::Button<'_> {
-    egui::Button::new(
-        RichText::new(label)
-            .font(semibold(16.0))
-            .color(Color32::WHITE),
-    )
-    .fill(GREEN)
-    .stroke(Stroke::NONE)
-    .min_size(vec2(0.0, 44.0))
-    .corner_radius(8)
+fn primary(label: &str) -> impl egui::Widget + '_ {
+    move |ui: &mut egui::Ui| {
+        let button = egui::Button::new(
+            RichText::new(label)
+                .font(semibold(16.0))
+                .color(Color32::WHITE),
+        )
+        .fill(ACCENT)
+        .min_size(vec2(0.0, 44.0))
+        .corner_radius(8);
+        let response = ui.add(button);
+        if response.has_focus() || response.hovered() {
+            ui.painter().rect_stroke(
+                response.rect.expand(2.0),
+                10,
+                Stroke::new(2.0_f32, HERO),
+                egui::StrokeKind::Inside,
+            );
+        }
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    }
 }
 
 fn panel() -> egui::Frame {
@@ -144,7 +159,7 @@ fn cover(
             egui::Align2::CENTER_CENTER,
             initial,
             FontId::proportional((rect.height() * 0.42).min(46.0)),
-            GREEN,
+            ACCENT,
         );
     }
 }
@@ -165,16 +180,16 @@ fn thumbnail_row(
             &game.name,
         )
     });
-    if selected || response.hovered() {
+    if selected || response.hovered() || response.has_focus() {
         ui.painter()
-            .rect_filled(rect, 9, if selected { ACTIVE } else { PANEL });
+            .rect_filled(rect, 9, if selected { ACTIVE } else { BACKGROUND });
     }
     if selected {
         let rail = egui::Rect::from_min_size(
             rect.left_top() + vec2(0.0, 10.0),
             vec2(3.0, rect.height() - 20.0),
         );
-        ui.painter().rect_filled(rail, 3, GREEN);
+        ui.painter().rect_filled(rail, 3, ACCENT);
     }
     let thumb = egui::Rect::from_min_size(rect.left_top() + vec2(10.0, 10.0), vec2(55.0, 38.0));
     cover(ui, thumb, art, &game.name, 6);
@@ -196,12 +211,22 @@ fn thumbnail_row(
         FontId::proportional(14.0),
         MUTED,
     );
-    response.on_hover_text(&game.name)
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            9,
+            Stroke::new(2.0_f32, ACCENT),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(&game.name)
 }
 
 impl App {
     fn library(&mut self, ui: &mut egui::Ui) {
-        ui.label(heading("Мои игры", 23.0));
+        ui.label(heading("Библиотека", 23.0));
         ui.add_space(2.0);
         ui.add(
             egui::TextEdit::singleline(&mut self.search)
@@ -211,7 +236,7 @@ impl App {
         );
         ui.horizontal_wrapped(|ui| {
             if ui.button("Добавить").clicked() {
-                self.open_add();
+                self.open_add(ui.ctx());
             }
             if ui
                 .button("Обновить")
@@ -273,54 +298,52 @@ impl App {
             self.settings.covers.get(&game.id).map(PathBuf::as_path),
         );
         let width = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(vec2(width, 204.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 16, PANEL);
-        let art_width = (width * 0.44).min(418.0);
-        let art_rect = egui::Rect::from_min_max(
+        let art_width = (width * 0.50).min(510.0);
+        let frame = egui::Frame::new()
+            .fill(HERO)
+            .corner_radius(14)
+            .inner_margin(20);
+        let response = frame.show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let left = ui.available_width() - art_width;
+            ui.allocate_ui_with_layout(
+                vec2(left, 136.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_max_width(left);
+                    ui.label(
+                        RichText::new(&game.store)
+                            .font(semibold(15.0))
+                            .color(ON_HERO),
+                    );
+                    ui.label(
+                        RichText::new(&game.name)
+                            .font(semibold(30.0))
+                            .color(Color32::WHITE),
+                    );
+                    ui.add_space(4.0);
+                    if ui
+                        .button(if self.show_setup {
+                            "Скрыть настройки"
+                        } else {
+                            "Настройки игры"
+                        })
+                        .clicked()
+                    {
+                        self.show_setup = !self.show_setup;
+                    }
+                },
+            );
+        });
+        let rect = response.response.rect;
+        let artwork = egui::Rect::from_min_max(
             pos2(rect.right() - art_width, rect.top()),
             rect.right_bottom(),
         );
-        cover(ui, art_rect, art.as_ref(), &game.name, 15);
-        if art.is_some() {
-            ui.painter()
-                .rect_filled(art_rect, 15, Color32::from_black_alpha(45));
-        }
-        let title_area = egui::Rect::from_min_max(
-            rect.left_top() + vec2(21.0, 20.0),
-            pos2(art_rect.left() - 12.0, rect.bottom() - 16.0),
-        );
-        let mut title = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(title_area)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        title.set_clip_rect(title_area);
-        title.label(RichText::new(&game.store).font(semibold(15.0)).color(GREEN));
-        title.add_space(5.0);
-        let mut job = egui::text::LayoutJob::simple(
-            game.name.clone(),
-            semibold(30.0),
-            TEXT,
-            title_area.width(),
-        );
-        job.wrap.max_rows = 2;
-        title
-            .label(job)
-            .on_hover_text(game.install_dir.display().to_string());
-        title.add_space(2.0);
-        if title
-            .button(if self.show_setup {
-                "Свернуть настройки"
-            } else {
-                "Настройки игры"
-            })
-            .clicked()
-        {
-            self.show_setup = !self.show_setup;
-        }
+        cover(ui, artwork, art.as_ref(), &game.name, 14);
     }
 
-    fn send_and_restore(&mut self, ui: &mut egui::Ui, game: &Game) {
+    fn send_save(&mut self, ui: &mut egui::Ui, game: &Game) {
         let ready_save = self
             .settings
             .save_paths
@@ -331,9 +354,9 @@ impl App {
         let ready = world.is_some() && ready_save.is_some();
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(heading("Обмен сохранениями", 20.0));
+            ui.label(heading("Отправка сохранения", 22.0));
             if ready {
-                muted(ui, "Закрой игру перед отправкой или восстановлением.");
+                muted(ui, "Сохрани прогресс и закрой игру перед отправкой.");
             } else {
                 muted(
                     ui,
@@ -346,27 +369,18 @@ impl App {
                     .add_enabled(ready, primary("Отправить сохранение"))
                     .clicked()
                 {
-                    if let (Some(world), Some(source)) = (world, ready_save.clone()) {
+                    if let (Some(world), Some(source)) = (world, ready_save) {
                         let sender = self.network.as_ref().map(peers::Network::sender);
                         self.start_job(ui.ctx(), move || {
                             peers::deliver(sender.as_ref(), &world, &source)
                         });
                     }
                 }
-                let restore = ui.add_enabled(
-                    ready_save.is_some() && self.version.is_some(),
-                    egui::Button::new("Восстановить версию"),
-                );
-                if restore.clicked() {
-                    if let (Some(version), Some(destination)) = (self.version.clone(), ready_save) {
-                        self.restore_confirmation = Some((version, destination));
-                    }
-                }
             });
         });
     }
 
-    fn history(&mut self, ui: &mut egui::Ui) {
+    fn history(&mut self, ui: &mut egui::Ui, game: &Game) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("История версий", 22.0));
@@ -386,15 +400,10 @@ impl App {
                         } else {
                             label.clone()
                         };
-                        let button = egui::Button::new(RichText::new(display).color(if selected {
-                            GREEN
-                        } else {
-                            TEXT
-                        }))
-                        .min_size(vec2(ui.available_width(), 36.0))
-                        .selected(selected);
+                        let radio =
+                            egui::RadioButton::new(selected, RichText::new(display).color(TEXT));
                         if ui
-                            .add(button)
+                            .add(radio)
                             .on_hover_text(
                                 path.file_name()
                                     .unwrap_or(path.as_os_str())
@@ -406,6 +415,20 @@ impl App {
                         }
                     }
                 });
+            let destination = self
+                .settings
+                .save_paths
+                .get(&game.id)
+                .filter(|path| path.is_file());
+            if ui
+                .add_enabled(
+                    destination.is_some() && self.version.is_some(),
+                    egui::Button::new("Восстановить версию"),
+                )
+                .clicked()
+            {
+                self.restore_confirmation = self.version.clone().zip(destination.cloned());
+            }
         });
     }
 
@@ -551,6 +574,7 @@ impl App {
                 ui.label("Название");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_game_name)
+                        .id(egui::Id::new("new-game-title"))
                         .margin(egui::Margin::symmetric(10, 8))
                         .desired_width(f32::INFINITY),
                 );
@@ -635,13 +659,13 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(37.0, 37.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 10, GREEN);
+                    ui.painter().rect_filled(rect, 10, ACCENT);
                     for shift in [3.0, -3.0] {
                         let tile = egui::Rect::from_center_size(
                             rect.center() + vec2(shift, -shift),
                             vec2(16.0, 12.0),
                         );
-                        ui.painter().rect_filled(tile, 3, GREEN);
+                        ui.painter().rect_filled(tile, 3, ACCENT);
                         ui.painter().rect_stroke(
                             tile,
                             3,
@@ -673,7 +697,7 @@ impl App {
                         {
                             ALERT
                         } else {
-                            GREEN
+                            ACCENT
                         };
                         ui.label(RichText::new(&self.status).color(color));
                     });
@@ -698,9 +722,9 @@ impl App {
                                     self.setup(ui, &game);
                                     ui.add_space(7.0);
                                 }
-                                self.send_and_restore(ui, &game);
+                                self.send_save(ui, &game);
                                 ui.add_space(7.0);
-                                self.history(ui);
+                                self.history(ui, &game);
                             });
                         } else {
                             self.welcome(ui);
@@ -726,7 +750,7 @@ impl eframe::App for App {
 // A save disk drawn in logical points stays sharp at native Windows DPI.
 fn save_illustration(ui: &egui::Ui, rect: egui::Rect) {
     let painter = ui.painter().with_clip_rect(rect);
-    painter.rect_filled(rect, 14, ACTIVE);
+    painter.rect_filled(rect, 14, ACCENT);
     let center = rect.center();
     let scale = (rect.width() / 258.0).min(rect.height() / 212.0).min(1.2);
     let point = |x, y| center + vec2(x, y) * scale;
@@ -736,16 +760,13 @@ fn save_illustration(ui: &egui::Ui, rect: egui::Rect) {
             painter.circle_filled(
                 rect.min + vec2(9.0 + 15.0 * col as f32, 9.0 + 15.0 * row as f32),
                 1.1,
-                Color32::from_rgb(177, 204, 184),
+                Color32::from_rgb(98, 144, 247),
             );
         }
     }
-    painter.circle_filled(center, 86.0 * scale, Color32::from_rgb(237, 246, 230));
-    let edge = Color32::from_rgb(25, 68, 51);
-    for (dx, dy, fill) in [
-        (11.0, 10.0, Color32::from_rgb(138, 179, 150)),
-        (0.0, 0.0, GREEN),
-    ] {
+    painter.circle_filled(center, 86.0 * scale, Color32::from_rgb(172, 202, 255));
+    let edge = HERO;
+    for (dx, dy, fill) in [(11.0, 10.0, ORANGE), (0.0, 0.0, ACCENT)] {
         let outline = [
             (-52.0, -59.0),
             (31.0, -59.0),
@@ -761,22 +782,14 @@ fn save_illustration(ui: &egui::Ui, rect: egui::Rect) {
             Stroke::new(2.0 * scale, edge),
         ));
     }
-    painter.rect_filled(
-        area(-32.0, -58.0, 54.0, 38.0),
-        2,
-        Color32::from_rgb(163, 195, 174),
-    );
+    painter.rect_filled(area(-32.0, -58.0, 54.0, 38.0), 2, ON_HERO);
     painter.rect_filled(area(4.0, -51.0, 10.0, 23.0), 1, edge);
     painter.rect_filled(
         area(-38.0, 1.0, 76.0, 56.0),
         3,
         Color32::from_rgb(255, 246, 219),
     );
-    painter.rect_filled(
-        area(-38.0, 1.0, 76.0, 12.0),
-        2,
-        Color32::from_rgb(236, 173, 76),
-    );
+    painter.rect_filled(area(-38.0, 1.0, 76.0, 12.0), 2, ORANGE);
     for (y, end) in [(26.0, 26.0), (37.0, 13.0)] {
         painter.line_segment(
             [point(-25.0, y), point(end, y)],
@@ -786,7 +799,8 @@ fn save_illustration(ui: &egui::Ui, rect: egui::Rect) {
 }
 
 impl App {
-    fn open_add(&mut self) {
+    fn open_add(&mut self, ctx: &egui::Context) {
+        ctx.memory_mut(|mem| mem.request_focus(egui::Id::new("new-game-title")));
         self.show_add = true;
         self.status.clear();
     }
@@ -834,14 +848,16 @@ impl App {
                             ui.add_space(if horizontal { 14.0 } else { 4.0 });
                             ui.vertical(|ui| {
                                 ui.label(heading("Добавь первую игру", 29.0));
-                                muted(ui, "Выбери папку игры, чтобы сохранять версии и передавать их друзьям.");
+                                muted(ui, "Укажи папку установленной игры. Здесь появятся её обложка и история сохранений.");
                                 ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
                                 if ui.add(primary("Добавить игру")).clicked() {
-                                    self.open_add();
+                                    self.open_add(ui.ctx());
                                 }
-                                if ui.link(RichText::new("Повторить поиск на ПК").color(GREEN).font(semibold(16.0))).clicked() {
+                                if ui.button("Повторить поиск на ПК").clicked() {
                                     self.rescan();
                                 }
+                                });
                             });
                         });
                     });
