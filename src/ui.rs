@@ -1,4 +1,4 @@
-use super::{App, Game, catalog, peers};
+use super::{App, Game, catalog};
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, pos2, vec2};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -297,58 +297,6 @@ impl App {
         }
     }
 
-    fn demo_controls(&mut self, ui: &mut egui::Ui) {
-        panel().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            let friend = self.demo.profile == "friend";
-            ui.label(heading(
-                if friend {
-                    "Тестовый профиль друга"
-                } else {
-                    "Тестовый профиль игрока"
-                },
-                22.0,
-            ));
-            ui.label(format!("Уровень в демоигре — {}", self.demo_level));
-            muted(
-                ui,
-                "Повысь уровень и отправь сохранение. Затем восстанови версию и проверь уровень.",
-            );
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Пройти уровень").clicked() {
-                    match self.demo.advance() {
-                        Ok(()) => self.refresh_versions(),
-                        Err(e) => self.status = format!("Не удалось изменить демосохранение. {e}"),
-                    }
-                }
-                if !friend {
-                    let opened = self
-                        .friend_window
-                        .as_mut()
-                        .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
-                    if ui
-                        .add_enabled(
-                            !opened,
-                            egui::Button::new(if opened {
-                                "Окно друга открыто"
-                            } else {
-                                "Открыть окно друга"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        match std::env::current_exe()
-                            .and_then(|exe| std::process::Command::new(exe).arg("--friend").spawn())
-                        {
-                            Ok(child) => self.friend_window = Some(child),
-                            Err(e) => self.status = format!("Не удалось открыть окно друга. {e}"),
-                        }
-                    }
-                }
-            });
-        });
-    }
-
     fn game_header(&mut self, ui: &mut egui::Ui, game: &Game) {
         let art = self.artwork.get(
             game,
@@ -403,90 +351,63 @@ impl App {
         cover(ui, artwork, art.as_ref(), &game.name, 14);
     }
 
-    fn group_controls(&mut self, ui: &mut egui::Ui, game: &Game) {
+    fn drive_controls(&mut self, ui: &mut egui::Ui) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(heading("Группа Google Диска", 22.0));
-            if let Some(rx)=&self.joining {
-                match rx.try_recv(){
-                    Ok(Ok(link))=>{self.joining=None;self.change_group(game,Some(link));}
-                    Ok(Err(e))=>{self.joining=None;self.status=format!("Не удалось отправить заявку. {e}");}
-                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.joining=None;self.status="Не удалось связаться с сервисом.".into();}
-                    _=>{}
-                }
+            ui.label(heading("Google Диск", 22.0));
+            if let Some(drive) = &self.drive {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Подключено");
+                    ui.hyperlink_to(&drive.folder.name, drive.folder.link());
+                });
             }
-            if let Some(group)=self.group(){
-                if let Some(m)=&self.membership{
-                    match m.role.as_str(){
-                        "pending"=>{
-                            ui.label(format!("Заявка отправлена. Ждём подтверждения владельца. Номер устройства: {}",m.id));
-                            ui.collapsing("Я владелец этой папки",|ui|{
-                                ui.label("Скопируй код, затем подтверди подключение в браузере.");
-                                if ui.button("Скопировать код своего устройства").clicked(){ui.ctx().copy_text(m.proof.clone());}
-                                ui.hyperlink_to("Подключить папку через Google",format!("{}/create?device={}",group.origin(),m.id));
-                            });
-                        }
-                        "denied"=>{ui.label("Владелец отклонил заявку.");}
-                        _=>{ui.label("Папка подключена");if ui.button("Скопировать ссылку на папку").clicked(){ui.ctx().copy_text(format!("https://drive.google.com/drive/folders/{}",m.folder));}}
+            if self.connect_drive.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spinner();
+                    ui.label("Разреши доступ и выбери папку в браузере.");
+                    if ui.button("Отменить").clicked() {
+                        self.cancel_drive_connection();
                     }
-                    let mut decision=None;
-                    for req in &m.requests {
-                        ui.horizontal_wrapped(|ui|{ui.label(format!("{} · устройство {}",req.nick,req.id));
-                            if ui.button("Разрешить").clicked(){decision=Some((req.id.clone(),true));}
-                            if ui.button("Отклонить").clicked(){decision=Some((req.id.clone(),false));}
-                        });
-                    }
-                    if let Some((id,allow))=decision{self.start_job(ui.ctx(),move||group.decide(&id,allow));}
-                } else if group.device {ui.label("Проверяем доступ устройства…");}
-                if ui.button("Отключиться").clicked(){self.change_group(game,None);}
+                });
+            } else if let Some(client) = crate::drive::Client::bundled()
+                .or_else(|| self.drive.as_ref().map(crate::drive::Drive::client))
+            {
+                let label = if self.drive.is_some() {
+                    "Выбрать другую папку"
+                } else {
+                    "Подключить Google Диск"
+                };
+                if ui.add(primary(label)).clicked() {
+                    self.start_drive_connection(client, ui.ctx());
+                }
             } else {
-                ui.label("Ссылка на папку Google Диска");
-                ui.add(egui::TextEdit::singleline(&mut self.invitation).hint_text("https://drive.google.com/drive/folders/…").desired_width(f32::INFINITY));
-                let folder=crate::group::folder_id(&self.invitation);
-                if !self.invitation.trim().is_empty() && folder.is_none(){muted(ui,"Открой папку на drive.google.com и скопируй её адрес.");}
-                if self.group_origin.is_none(){muted(ui,"Сервис подключения недоступен в этой сборке. Локальный обмен можно проверить в деморежиме.");}
-                if ui.add_enabled(self.config_error.is_none() && self.group_origin.is_some() && folder.is_some() && self.joining.is_none(),egui::Button::new("Подключить папку")).clicked(){
-                    let origin=self.group_origin.clone().unwrap();let nick=self.settings.nickname.clone();
-                    let folder=folder.unwrap();let context=ui.ctx().clone();
-                    let (tx,rx)=std::sync::mpsc::channel();self.joining=Some(rx);
-                    std::thread::spawn(move||{let _=tx.send(crate::group::join(&origin,folder,nick));context.request_repaint();});
+                muted(ui, "В этой сборке подключение Google Диска недоступно.");
+            }
+            if self.drive.is_some()
+                && self.connect_drive.is_none()
+                && ui.button("Отключить Google Диск").clicked()
+            {
+                let path = self.settings_path.with_file_name("google-drive.dat");
+                match std::fs::remove_file(path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        self.cloud_error = format!("Не удалось отключить Диск. {e}");
+                    }
+                    _ => {
+                        self.drive = None;
+                        self.reset_drive_history();
+                        self.status = "Google Диск отключён на этом ПК.".into();
+                    }
                 }
             }
             if !self.cloud_error.is_empty() {
-                ui.label(&self.cloud_error);
+                ui.label(RichText::new(&self.cloud_error).color(ALERT));
             }
         });
     }
-    fn change_group(&mut self, game: &Game, link: Option<String>) {
-        if self.config_error.is_some() {
-            return;
-        }
-        let mut settings = self.settings.clone();
-        if let Some(link) = link {
-            settings.groups.insert(game.id.clone(), link);
-        } else {
-            settings.groups.remove(&game.id);
-        }
-        match settings.write(&self.settings_path) {
-            Ok(()) => {
-                self.settings = settings;
-                self.select(game.id.clone());
-            }
-            Err(e) => self.status = format!("Не удалось записать настройки. {e}"),
-        }
-    }
     fn send_save(&mut self, ui: &mut egui::Ui, game: &Game) {
         let ready_save = self.active_save(&game.id).map(std::path::Path::to_path_buf);
-        let world = self.world();
-        let cloud = self.group();
-        let ready = ready_save.is_some()
-            && cloud.as_ref().map_or(world.is_some(), |g| {
-                !g.device
-                    || self
-                        .membership
-                        .as_ref()
-                        .is_some_and(|m| matches!(m.role.as_str(), "owner" | "member"))
-            });
+        let drive = self.drive.clone();
+        let ready = ready_save.is_some() && drive.is_some();
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
@@ -497,7 +418,7 @@ impl App {
                     if ready {
                         muted(ui, "Сохрани игру и закрой её перед отправкой.");
                     } else {
-                        muted(ui, "Для отправки подключись к группе.");
+                        muted(ui, "Для отправки подключи Google Диск.");
                     }
                 }
                 None if !self.candidates.is_empty() => {
@@ -531,14 +452,10 @@ impl App {
                     .clicked()
                 {
                     let author = self.settings.nickname.clone();
-                    if let (Some(group), Some(source)) = (cloud, ready_save.as_ref()) {
+                    if let (Some(drive), Some(source)) = (drive, ready_save.as_ref()) {
                         let source = source.clone();
-                        self.start_job(ui.ctx(), move || group.send(&source, &author));
-                    } else if let (Some(world), Some(source)) = (world, ready_save) {
-                        let sender = self.network.as_ref().map(peers::Network::sender);
-                        self.start_job(ui.ctx(), move || {
-                            peers::deliver(sender.as_ref(), &world, &source, &author)
-                        });
+                        let game = crate::drive::game_key(game);
+                        self.start_job(ui.ctx(), move || drive.send(&game, &source, &author));
                     }
                 }
             });
@@ -784,17 +701,13 @@ impl App {
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
         self.artwork.poll(ctx);
         self.check_job();
-        self.poll_group(ctx);
+        self.poll_drive(ctx);
         let idle = self.job.is_none();
         if self.selected.is_some() && idle {
             if self.saves_checked.elapsed() >= Duration::from_secs(4) {
                 self.scan_saves();
             }
-            let interval = Duration::from_secs(2);
-            if self.last_refresh.elapsed() >= interval {
-                self.refresh_versions();
-            }
-            ctx.request_repaint_after(interval.saturating_sub(self.last_refresh.elapsed()));
+            ctx.request_repaint_after(Duration::from_secs(2));
         }
         egui::TopBottomPanel::top("brand")
             .frame(
@@ -820,13 +733,6 @@ impl App {
                         );
                     }
                     ui.label(heading("GameSaves", 24.0));
-                    if !self.demo_mode && ui.button("Деморежим").clicked() {
-                        if let Err(error) = std::env::current_exe()
-                            .and_then(|exe| std::process::Command::new(exe).arg("--demo").spawn())
-                        {
-                            self.status = format!("Не удалось открыть деморежим. {error}");
-                        }
-                    }
                     ui.separator();
                     ui.label("Мой ник");
                     ui.add(
@@ -901,10 +807,7 @@ impl App {
                         if let Some(game) = game {
                             ui.add_enabled_ui(idle, |ui| {
                                 self.game_header(ui, &game);
-                                self.group_controls(ui, &game);
-                                if self.demo_mode && game.id == crate::demo::GAME_ID {
-                                    self.demo_controls(ui);
-                                }
+                                self.drive_controls(ui);
                                 ui.add_space(8.0);
                                 if self.show_setup {
                                     self.setup(ui, &game);
@@ -1018,38 +921,57 @@ impl App {
     fn welcome(&mut self, ui: &mut egui::Ui) {
         let width = ui.available_width().min(900.0);
         ui.vertical_centered(|ui| {
-            ui.allocate_ui_with_layout(vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.add_space(4.0);
-                ui.label(heading("Библиотека игр", 31.0));
-                ui.add_space(8.0);
-                egui::Frame::new().fill(PANEL).stroke(Stroke::new(1.0_f32, BORDER))
-                    .corner_radius(18).inner_margin(18).show(ui, |ui| {
-                        let available = ui.available_width();
-                        let horizontal = available >= 620.0;
-                        let art_width = if horizontal { (available * 0.35).min(296.0) } else { available };
-                        let art_height = if horizontal { 212.0 } else { 126.0 };
-                        let layout = if horizontal { egui::Layout::left_to_right(egui::Align::Center) }
-                                     else { egui::Layout::top_down(egui::Align::Min) };
-                        ui.with_layout(layout, |ui| {
-                            let (rect, _) = ui.allocate_exact_size(vec2(art_width, art_height), egui::Sense::hover());
-                            save_illustration(ui, rect);
-                            ui.add_space(if horizontal { 14.0 } else { 4.0 });
-                            ui.vertical(|ui| {
-                                ui.label(heading("Добавь первую игру", 29.0));
-                                muted(ui, "Добавь игру. GameSaves попробует найти сейв сам. Если игр нет, нажми «Деморежим» вверху.");
-                                ui.add_space(6.0);
-                                ui.horizontal_wrapped(|ui| {
-                                if ui.add(primary("Добавить игру")).clicked() {
-                                    self.open_add(ui.ctx());
-                                }
-                                if ui.button("Повторить поиск на ПК").clicked() {
-                                    self.rescan();
-                                }
+            ui.allocate_ui_with_layout(
+                vec2(width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.add_space(4.0);
+                    ui.label(heading("Библиотека игр", 31.0));
+                    ui.add_space(8.0);
+                    egui::Frame::new()
+                        .fill(PANEL)
+                        .stroke(Stroke::new(1.0_f32, BORDER))
+                        .corner_radius(18)
+                        .inner_margin(18)
+                        .show(ui, |ui| {
+                            let available = ui.available_width();
+                            let horizontal = available >= 620.0;
+                            let art_width = if horizontal {
+                                (available * 0.35).min(296.0)
+                            } else {
+                                available
+                            };
+                            let art_height = if horizontal { 212.0 } else { 126.0 };
+                            let layout = if horizontal {
+                                egui::Layout::left_to_right(egui::Align::Center)
+                            } else {
+                                egui::Layout::top_down(egui::Align::Min)
+                            };
+                            ui.with_layout(layout, |ui| {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(art_width, art_height),
+                                    egui::Sense::hover(),
+                                );
+                                save_illustration(ui, rect);
+                                ui.add_space(if horizontal { 14.0 } else { 4.0 });
+                                ui.vertical(|ui| {
+                                    ui.label(heading("Добавь первую игру", 29.0));
+                                    muted(ui, "Добавь игру. GameSaves попробует найти сейв сам.");
+                                    ui.add_space(6.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.add(primary("Добавить игру")).clicked() {
+                                            self.open_add(ui.ctx());
+                                        }
+                                        if ui.button("Повторить поиск на ПК").clicked()
+                                        {
+                                            self.rescan();
+                                        }
+                                    });
                                 });
                             });
                         });
-                    });
-            });
+                },
+            );
         });
     }
 }

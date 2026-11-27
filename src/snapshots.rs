@@ -7,21 +7,6 @@ use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn world_directory(shared: &Path, code: &str) -> Result<PathBuf> {
-    if !shared.is_absolute() {
-        return Err("Выбери существующую общую папку.".into());
-    }
-    if code.is_empty()
-        || code.len() > 64
-        || !code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
-    {
-        return Err("В коде мира нужны латинские буквы, цифры или дефисы (до 64 символов).".into());
-    }
-    Ok(shared
-        .join("GameSaves")
-        .join(format!("world-{}", code.to_ascii_lowercase())))
-}
-
 pub(crate) fn version_timestamp(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let (timestamp, suffix) = name
         .strip_prefix("save-")?
@@ -38,10 +23,6 @@ pub(crate) fn version_timestamp(name: &str) -> Option<chrono::DateTime<chrono::U
     chrono::DateTime::from_timestamp_millis(timestamp.parse().ok()?)
 }
 
-pub fn valid_version_name(name: &str) -> bool {
-    version_timestamp(name).is_some()
-}
-
 pub fn valid_nickname(name: &str) -> bool {
     (1..=24).contains(&name.chars().count())
         && name.trim() == name
@@ -50,6 +31,7 @@ pub fn valid_nickname(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
 }
 
+#[cfg(test)]
 fn archive_author(path: &Path) -> Option<String> {
     let zip = ZipArchive::new(File::open(path).ok()?).ok()?;
     let name = std::str::from_utf8(zip.comment())
@@ -69,6 +51,7 @@ pub fn version_label(date: chrono::DateTime<chrono::Utc>, name: Option<&str>) ->
     )
 }
 
+#[cfg(test)]
 pub fn versions(directory: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -137,17 +120,6 @@ pub fn publish(source: &Path, directory: &Path, author: &str) -> Result<PathBuf>
     Ok(destination)
 }
 
-pub fn copy_version(version: &Path, directory: &Path) -> Result<()> {
-    fs::create_dir_all(directory)?;
-    let name = version.file_name().ok_or("У версии нет имени файла.")?;
-    let destination = directory.join(name);
-    let mut pending = Builder::new().suffix(".pending").tempfile_in(directory)?;
-    io::copy(&mut File::open(version)?, &mut pending)?;
-    pending.as_file().sync_all()?;
-    pending.persist_noclobber(destination)?;
-    Ok(())
-}
-
 pub fn restore(version: &Path, destination: &Path) -> Result<PathBuf> {
     if !(destination.is_file() || destination.is_dir())
         || fs::symlink_metadata(destination)?.is_symlink()
@@ -203,7 +175,7 @@ mod tests {
     #[test]
     fn two_versions_restore_with_backup() -> Result<()> {
         let root = tempfile::tempdir()?;
-        let shared = world_directory(root.path(), "subnautica-2")?;
+        let shared = root.path().join("versions");
         let local = root.path().join("savegame_0.sav");
         fs::write(&local, b"first world state")?;
         let first = publish(&local, &shared, "Ваня")?;

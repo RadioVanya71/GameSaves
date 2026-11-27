@@ -2,9 +2,7 @@
 
 mod artwork;
 mod catalog;
-mod demo;
-mod group;
-mod peers;
+mod drive;
 mod snapshots;
 mod ui;
 mod world_folder;
@@ -12,24 +10,26 @@ mod world_folder;
 use catalog::{Game, Settings};
 use eframe::egui;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
+};
 use std::time::Instant;
+
+struct PendingDriveConnection {
+    result: Receiver<drive::Result<drive::Drive>>,
+    cancelled: Arc<AtomicBool>,
+}
 
 struct App {
     nickname_input: String,
-    invitation: String,
-    cloud_list:
-        Option<Receiver<group::Result<(Option<group::Membership>, Vec<(String, PathBuf)>)>>>,
-    membership: Option<group::Membership>,
-    joining: Option<Receiver<group::Result<String>>>,
+    drive: Option<drive::Drive>,
+    connect_drive: Option<PendingDriveConnection>,
+    cloud_list: Option<Receiver<drive::Result<Vec<(String, PathBuf)>>>>,
     cloud_checked: Option<Instant>,
     cloud_error: String,
     jump_to_history: bool,
-    demo: demo::Demo,
-    demo_mode: bool,
-    group_origin: Option<String>,
-    friend_window: Option<std::process::Child>,
-    demo_level: String,
     settings: Settings,
     settings_path: PathBuf,
     config_error: Option<String>,
@@ -45,8 +45,6 @@ struct App {
     version: Option<PathBuf>,
     restore_confirmation: Option<(PathBuf, PathBuf)>,
     job: Option<Receiver<Result<String, String>>>,
-    network: Option<peers::Network>,
-    last_refresh: Instant,
     saves_checked: Instant,
     new_game_name: String,
     new_game_dir: String,
@@ -55,69 +53,32 @@ struct App {
 
 impl App {
     fn new(context: &egui::Context) -> Self {
-        let demo = demo::Demo::new(
-            catalog::settings_path().with_file_name("demo"),
-            std::env::args_os().any(|arg| arg == "--friend"),
-        );
-        let demo_mode = std::env::args_os().any(|a| a == "--demo" || a == "--friend");
-        let setup_error = demo_mode
-            .then(|| demo.prepare().err())
-            .flatten()
-            .map(|e| format!("Не удалось подготовить демоигру. {e}"));
-        let settings_path = if demo_mode {
-            demo.settings_path()
-        } else {
-            catalog::settings_path()
-        };
+        let settings_path = catalog::settings_path();
         let (mut settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
-        let config_error = setup_error.or(config_error);
         let games = catalog::discover(&settings.custom_games);
-        let network = demo_mode
-            .then(|| {
-                settings_path
-                    .parent()
-                    .and_then(|path| peers::Network::start(path.to_path_buf()).ok())
-            })
-            .flatten();
         let artwork = artwork::Artwork::new(
             context,
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
         if !snapshots::valid_nickname(&settings.nickname) {
-            settings.nickname = if demo.profile == "friend" {
-                "Друг"
-            } else {
-                "Игрок"
-            }
-            .into();
+            settings.nickname = "Игрок".into();
         }
+        let (drive, drive_error) =
+            match drive::load(&settings_path.with_file_name("google-drive.dat")) {
+                Ok(drive) => (drive, String::new()),
+                Err(e) => (None, e),
+            };
         let mut app = Self {
             nickname_input: settings.nickname.clone(),
-            invitation: String::new(),
+            drive,
+            connect_drive: None,
             cloud_list: None,
-            membership: None,
-            joining: None,
             cloud_checked: None,
-            cloud_error: String::new(),
+            cloud_error: drive_error,
             jump_to_history: false,
-            demo,
-            demo_mode,
-            group_origin: std::env::var("GAMESAVES_GROUP_ORIGIN")
-                .ok()
-                .or_else(|| option_env!("GAMESAVES_GROUP_ORIGIN").map(str::to_owned))
-                .and_then(|s| url::Url::parse(&s).ok())
-                .filter(|url| {
-                    url.scheme() == "https"
-                        && url.host_str().is_some()
-                        && url.username().is_empty()
-                        && url.password().is_none()
-                })
-                .map(|url| url.origin().ascii_serialization()),
-            friend_window: None,
-            demo_level: String::new(),
             settings,
             settings_path,
             config_error,
@@ -133,24 +94,15 @@ impl App {
             version: None,
             restore_confirmation: None,
             job: None,
-            network,
-            last_refresh: Instant::now(),
             saves_checked: Instant::now(),
             new_game_name: String::new(),
             new_game_dir: String::new(),
             status: String::new(),
         };
-        app.configure_network();
         let initial = app
             .games
             .iter()
-            .find(|game| {
-                if demo_mode {
-                    game.id == demo::GAME_ID
-                } else {
-                    app.settings.save_paths.contains_key(&game.id)
-                }
-            })
+            .find(|game| app.settings.save_paths.contains_key(&game.id))
             .or_else(|| app.games.first())
             .map(|game| game.id.clone());
         if let Some(id) = initial {
@@ -166,9 +118,6 @@ impl App {
             .get(&id)
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
         self.show_setup = false;
-        self.membership = None;
-        self.joining = None;
-        self.invitation.clear();
         self.cloud_list = None;
         self.cloud_checked = None;
         self.cloud_error.clear();
@@ -177,7 +126,6 @@ impl App {
         self.selected = Some(id);
         self.scan_saves();
         self.status.clear();
-        self.refresh_versions();
     }
 
     fn add_game(&mut self) {
@@ -247,89 +195,99 @@ impl App {
         }
     }
 
-    fn world_with_code(&self, code: &str) -> Option<peers::World> {
-        if !self.demo_mode {
-            return None;
-        }
-        let shared = snapshots::world_directory(&self.demo.root.join("shared"), code).ok()?;
-        peers::World::new(shared, self.settings_path.parent()?)
-    }
-
-    fn world(&self) -> Option<peers::World> {
-        (self.selected.as_deref() == Some(demo::GAME_ID))
-            .then(|| self.world_with_code(demo::WORLD_CODE))
-            .flatten()
-    }
-
-    fn configure_network(&self) {
-        if let Some(network) = &self.network {
-            network.configure(self.world_with_code(demo::WORLD_CODE).into_iter().collect());
-        }
-    }
-
-    fn refresh_versions(&mut self) {
-        self.last_refresh = Instant::now();
-        if self.selected.as_deref() == Some(demo::GAME_ID) {
-            self.demo_level = self
-                .demo
-                .level()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "неизвестен".into());
-        }
-        if self.group().is_some() {
+    fn start_drive_connection(&mut self, client: drive::Client, ctx: &egui::Context) {
+        if self.connect_drive.is_some() {
             return;
         }
-        let inspect_older = self
-            .version
+        self.cloud_error.clear();
+        let (tx, rx) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.connect_drive = Some(PendingDriveConnection {
+            result: rx,
+            cancelled: cancelled.clone(),
+        });
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(drive::Drive::connect(client, &cancelled));
+            context.request_repaint();
+        });
+    }
+
+    fn cancel_drive_connection(&mut self) {
+        if let Some(pending) = self.connect_drive.take() {
+            pending.cancelled.store(true, Ordering::Relaxed);
+            self.status = if self.drive.is_some() {
+                "Смена папки отменена."
+            } else {
+                "Подключение Google Диска отменено."
+            }
+            .into();
+        }
+    }
+
+    fn reset_drive_history(&mut self) {
+        self.cloud_list = None;
+        self.cloud_checked = None;
+        self.versions.clear();
+        self.version = None;
+        self.cloud_error.clear();
+        self.restore_confirmation = None;
+    }
+
+    fn poll_drive(&mut self, ctx: &egui::Context) {
+        if let Some(pending) = &self.connect_drive {
+            match pending.result.try_recv() {
+                Ok(Ok(new_drive)) => {
+                    self.connect_drive = None;
+                    match drive::save(
+                        &self.settings_path.with_file_name("google-drive.dat"),
+                        &new_drive,
+                    ) {
+                        Ok(()) => {
+                            self.drive = Some(new_drive);
+                            self.reset_drive_history();
+                            self.status = "Google Диск подключён.".into();
+                        }
+                        Err(e) => self.cloud_error = e,
+                    }
+                }
+                Ok(Err(e)) => {
+                    self.connect_drive = None;
+                    self.cloud_error = e;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.connect_drive = None;
+                    self.cloud_error = "Подключение прервано.".into();
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let Some(drive) = self.drive.clone() else {
+            return;
+        };
+        let Some(game) = self
+            .selected
             .as_ref()
-            .filter(|path| {
-                self.versions
-                    .first()
-                    .is_some_and(|(_, latest)| *path != latest)
-            })
-            .cloned();
-        self.versions = self
-            .world()
-            .map(|world| {
-                let local = snapshots::versions(&world.local).unwrap_or_default();
-                let shared = snapshots::versions(&world.shared).unwrap_or_default();
-                let mut seen = std::collections::HashSet::new();
-                let mut versions: Vec<_> = local
-                    .into_iter()
-                    .chain(shared)
-                    .filter(|(_, path)| seen.insert(path.file_name().map(|name| name.to_owned())))
-                    .collect();
-                versions.sort_by(|left, right| right.1.file_name().cmp(&left.1.file_name()));
-                versions
-            })
-            .unwrap_or_default();
-        self.version = inspect_older
-            .filter(|path| self.versions.iter().any(|(_, current)| current == path))
-            .or_else(|| self.versions.first().map(|(_, path)| path.clone()));
-    }
-
-    fn group(&self) -> Option<group::Group> {
-        group::Group::parse(self.settings.groups.get(self.selected.as_ref()?)?).ok()
-    }
-
-    fn poll_group(&mut self, ctx: &egui::Context) {
-        let Some(group) = self.group() else { return };
+            .and_then(|id| self.games.iter().find(|game| &game.id == id))
+        else {
+            return;
+        };
         if let Some(rx) = &self.cloud_list {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok((membership, rows))) => {
-                    self.membership = membership;
-                    self.version = self
-                        .version
-                        .take()
-                        .filter(|v| rows.iter().any(|(_, p)| p == v))
+                Ok(Ok(rows)) => {
+                    let previous = self.version.take();
+                    let previous_was_latest =
+                        previous.as_ref() == self.versions.first().map(|(_, p)| p);
+                    self.version = previous
+                        .filter(|v| !previous_was_latest && rows.iter().any(|(_, p)| p == v))
                         .or_else(|| rows.first().map(|(_, p)| p.clone()));
                     self.versions = rows;
                     self.cloud_error.clear();
                 }
-                _ => {
-                    self.cloud_error =
-                        "Не удалось обновить историю группы. Проверь связь или приглашение.".into()
+                Ok(Err(e)) => self.cloud_error = e,
+                Err(TryRecvError::Disconnected) => {
+                    self.cloud_error = "Не удалось обновить историю Google Диска.".into()
                 }
             }
             self.cloud_list = None;
@@ -343,25 +301,10 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.cloud_list = Some(rx);
         self.cloud_checked = Some(Instant::now());
+        let key = drive::game_key(game);
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
-                let membership = if group.device {
-                    Some(group.membership()?)
-                } else {
-                    None
-                };
-                let authorized = membership
-                    .as_ref()
-                    .is_none_or(|m| matches!(m.role.as_str(), "owner" | "member"));
-                let rows = if authorized {
-                    group.list()?
-                } else {
-                    Vec::new()
-                };
-                Ok((membership, rows))
-            })();
-            let _ = tx.send(result);
+            let _ = tx.send(drive.list(&key));
             context.request_repaint();
         });
     }
@@ -390,8 +333,8 @@ impl App {
             Err(TryRecvError::Empty) => return,
         };
         self.job = None;
+        self.cloud_list = None;
         self.cloud_checked = None;
-        self.refresh_versions();
     }
 
     fn confirm_restore(&mut self, ctx: &egui::Context) {
@@ -414,21 +357,16 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Восстановить").clicked() {
                         self.restore_confirmation = None;
-                        let group = self.group();
-                        self.start_job(ctx, move || {
-                            match group {
-                                Some(g) => g.restore(&version, &destination),
-                                None => snapshots::restore(&version, &destination)
-                                    .map_err(|e| e.to_string()),
-                            }
-                            .map(|backup| {
-                                format!(
-                                    "Сохранение восстановлено. Резервная копия: {}",
-                                    backup.display()
-                                )
-                            })
-                            .map_err(|error| error.to_string())
-                        });
+                        if let Some(drive) = self.drive.clone() {
+                            self.start_job(ctx, move || {
+                                drive.restore(&version, &destination).map(|backup| {
+                                    format!(
+                                        "Сохранение восстановлено. Резервная копия: {}",
+                                        backup.display()
+                                    )
+                                })
+                            });
+                        }
                     }
                     if ui.button("Отмена").clicked() {
                         self.restore_confirmation = None;
@@ -446,13 +384,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        if std::env::args_os().any(|arg| arg == "--friend") {
-            "GameSaves Demo · Друг"
-        } else if std::env::args_os().any(|arg| arg == "--demo") {
-            "GameSaves Demo · Игрок"
-        } else {
-            "GameSaves"
-        },
+        "GameSaves",
         options,
         Box::new(|creation| {
             ui::configure(&creation.egui_ctx);
