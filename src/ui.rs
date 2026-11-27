@@ -292,6 +292,58 @@ impl App {
         }
     }
 
+    fn demo_controls(&mut self, ui: &mut egui::Ui) {
+        panel().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let friend = self.demo.profile == "friend";
+            ui.label(heading(
+                if friend {
+                    "Тестовый профиль друга"
+                } else {
+                    "Тестовый профиль игрока"
+                },
+                22.0,
+            ));
+            ui.label(format!("Уровень в демоигре — {}", self.demo_level));
+            muted(
+                ui,
+                "Повысь уровень и отправь сохранение. Затем восстанови версию и проверь уровень.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Пройти уровень").clicked() {
+                    match self.demo.advance() {
+                        Ok(()) => self.refresh_versions(),
+                        Err(e) => self.status = format!("Не удалось изменить демосохранение. {e}"),
+                    }
+                }
+                if !friend {
+                    let opened = self
+                        .friend_window
+                        .as_mut()
+                        .is_some_and(|child| matches!(child.try_wait(), Ok(None)));
+                    if ui
+                        .add_enabled(
+                            !opened,
+                            egui::Button::new(if opened {
+                                "Окно друга открыто"
+                            } else {
+                                "Открыть окно друга"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        match std::env::current_exe()
+                            .and_then(|exe| std::process::Command::new(exe).arg("--friend").spawn())
+                        {
+                            Ok(child) => self.friend_window = Some(child),
+                            Err(e) => self.status = format!("Не удалось открыть окно друга. {e}"),
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     fn game_header(&mut self, ui: &mut egui::Ui, game: &Game) {
         let art = self.artwork.get(
             game,
@@ -332,6 +384,9 @@ impl App {
                     {
                         self.show_setup = !self.show_setup;
                     }
+                    if ui.button("История версий").clicked() {
+                        self.jump_to_history = true;
+                    }
                 },
             );
         });
@@ -343,15 +398,93 @@ impl App {
         cover(ui, artwork, art.as_ref(), &game.name, 14);
     }
 
+    fn group_controls(&mut self, ui: &mut egui::Ui, game: &Game) {
+        panel().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(heading("Группа Google Диска", 22.0));
+            if let Some(link) = self.settings.groups.get(&game.id).cloned() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Скопировать приглашение").clicked() {
+                        ui.ctx().copy_text(link);
+                    }
+                    if ui.button("Выйти из группы").clicked() {
+                        self.change_group(game, None);
+                    }
+                });
+            } else {
+                let service = self.group_origin.as_deref();
+                if let Some(url) = service {
+                    ui.hyperlink_to(
+                        "Создать группу",
+                        format!("{}/create", url.trim_end_matches('/')),
+                    );
+                    self.invite_field(ui, game);
+                } else {
+                    muted(ui, "В этой сборке сервис групп не подключён. Создать группу из папки Google Диска пока нельзя.");
+                    ui.collapsing("У меня есть приглашение GameSaves", |ui| {
+                        self.invite_field(ui, game);
+                    });
+                }
+            }
+            if !self.cloud_error.is_empty() {
+                ui.label(&self.cloud_error);
+            }
+        });
+    }
+    fn invite_field(&mut self, ui: &mut egui::Ui, game: &Game) {
+        ui.label("Приглашение GameSaves от владельца группы");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.invitation)
+                .hint_text("Вставь приглашение")
+                .password(true),
+        );
+        let input = self.invitation.trim();
+        let parsed = crate::group::Group::parse(input);
+        if !input.is_empty() && parsed.is_err() {
+            let drive = url::Url::parse(input)
+                .ok()
+                .is_some_and(|u| u.host_str() == Some("drive.google.com"));
+            ui.label(egui::RichText::new(if drive {
+                "Это ссылка на папку Google Диска. Для входа друг должен прислать приглашение из GameSaves."
+            } else {
+                "Скопируй приглашение целиком, включая часть после #."
+            }).color(ALERT));
+        }
+        if ui
+            .add_enabled(parsed.is_ok(), egui::Button::new("Войти в группу"))
+            .clicked()
+        {
+            self.change_group(game, Some(input.to_string()));
+        }
+    }
+    fn change_group(&mut self, game: &Game, link: Option<String>) {
+        if self.config_error.is_some() {
+            return;
+        }
+        let mut settings = self.settings.clone();
+        if let Some(link) = link {
+            settings.groups.insert(game.id.clone(), link);
+        } else {
+            settings.groups.remove(&game.id);
+        }
+        match settings.write(&self.settings_path) {
+            Ok(()) => {
+                self.settings = settings;
+                self.select(game.id.clone());
+            }
+            Err(e) => self.status = format!("Не удалось записать настройки. {e}"),
+        }
+    }
     fn send_save(&mut self, ui: &mut egui::Ui, game: &Game) {
         let ready_save = self
             .settings
             .save_paths
             .get(&game.id)
-            .filter(|path| path.is_file())
+            .filter(|path| path.is_file() || path.is_dir())
             .cloned();
         let world = self.world();
-        let ready = world.is_some() && ready_save.is_some();
+        let cloud = self.group();
+        let ready = (world.is_some() || cloud.is_some()) && ready_save.is_some();
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
@@ -369,10 +502,14 @@ impl App {
                     .add_enabled(ready, primary("Отправить сохранение"))
                     .clicked()
                 {
-                    if let (Some(world), Some(source)) = (world, ready_save) {
+                    let author = self.settings.nickname.clone();
+                    if let (Some(group), Some(source)) = (cloud, ready_save.as_ref()) {
+                        let source = source.clone();
+                        self.start_job(ui.ctx(), move || group.send(&source, &author));
+                    } else if let (Some(world), Some(source)) = (world, ready_save) {
                         let sender = self.network.as_ref().map(peers::Network::sender);
                         self.start_job(ui.ctx(), move || {
-                            peers::deliver(sender.as_ref(), &world, &source)
+                            peers::deliver(sender.as_ref(), &world, &source, &author)
                         });
                     }
                 }
@@ -383,43 +520,40 @@ impl App {
     fn history(&mut self, ui: &mut egui::Ui, game: &Game) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(heading("История версий", 22.0));
+            let title = ui.label(heading("История версий", 22.0));
+            if self.jump_to_history {
+                self.jump_to_history = false;
+                title.scroll_to_me(Some(egui::Align::TOP));
+            }
             if self.versions.is_empty() {
                 muted(ui, "Полученные и отправленные версии появятся здесь.");
                 return;
             }
-            egui::ScrollArea::vertical()
-                .id_salt("versions")
-                .max_height(225.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (index, (label, path)) in self.versions.iter().enumerate() {
-                        let selected = Some(path) == self.version.as_ref();
-                        let display = if index == 0 {
-                            format!("{label}  ·  Последняя")
-                        } else {
-                            label.clone()
-                        };
-                        let radio =
-                            egui::RadioButton::new(selected, RichText::new(display).color(TEXT));
-                        if ui
-                            .add(radio)
-                            .on_hover_text(
-                                path.file_name()
-                                    .unwrap_or(path.as_os_str())
-                                    .to_string_lossy(),
-                            )
-                            .clicked()
-                        {
-                            self.version = Some(path.clone());
-                        }
-                    }
-                });
+            for (index, (label, path)) in self.versions.iter().enumerate() {
+                let selected = Some(path) == self.version.as_ref();
+                let display = if index == 0 {
+                    format!("{label}  ·  Последняя")
+                } else {
+                    label.clone()
+                };
+                let radio = egui::RadioButton::new(selected, RichText::new(display).color(TEXT));
+                if ui
+                    .add(radio)
+                    .on_hover_text(
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy(),
+                    )
+                    .clicked()
+                {
+                    self.version = Some(path.clone());
+                }
+            }
             let destination = self
                 .settings
                 .save_paths
                 .get(&game.id)
-                .filter(|path| path.is_file());
+                .filter(|path| path.is_file() || path.is_dir());
             if ui
                 .add_enabled(
                     destination.is_some() && self.version.is_some(),
@@ -436,7 +570,7 @@ impl App {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Настройки игры", 22.0));
-            ui.label("Файл сохранения");
+            ui.label("Файл сохранения или папка одного мира");
             if !self.candidates.is_empty() {
                 egui::ComboBox::from_id_salt("candidates")
                     .selected_text("Найденные сохранения")
@@ -458,6 +592,12 @@ impl App {
                     });
             }
             path_field(ui, &mut self.save_path, true);
+            #[cfg(windows)]
+            if ui.button("Выбрать папку мира").clicked() {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    self.save_path = dir.display().to_string();
+                }
+            }
             if ui
                 .add_enabled(
                     self.config_error.is_none(),
@@ -466,11 +606,6 @@ impl App {
                 .clicked()
             {
                 self.remember_path(&game.id);
-            }
-            if let Some(path) = self.settings.save_paths.get(&game.id) {
-                if !path.is_file() {
-                    muted(ui, "Для обмена нужен отдельный файл сохранения.");
-                }
             }
             ui.separator();
             ui.label("Общая папка");
@@ -642,6 +777,7 @@ impl App {
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
         self.artwork.poll(ctx);
         self.check_job();
+        self.poll_group(ctx);
         let idle = self.job.is_none();
         if self.selected.is_some() && idle {
             let interval = Duration::from_secs(2);
@@ -674,6 +810,44 @@ impl App {
                         );
                     }
                     ui.label(heading("GameSaves", 24.0));
+                    if !self.demo_mode && ui.button("Деморежим").clicked() {
+                        if let Err(error) = std::env::current_exe()
+                            .and_then(|exe| std::process::Command::new(exe).arg("--demo").spawn())
+                        {
+                            self.status = format!("Не удалось открыть деморежим. {error}");
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Мой ник");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.nickname_input)
+                            .char_limit(24)
+                            .desired_width(155.0),
+                    );
+                    let name = self.nickname_input.trim();
+                    if self.settings.nickname != name {
+                        let valid = crate::snapshots::valid_nickname(name);
+                        if ui
+                            .add_enabled(
+                                valid && self.config_error.is_none(),
+                                egui::Button::new("Сохранить"),
+                            )
+                            .clicked()
+                        {
+                            let mut updated = self.settings.clone();
+                            updated.nickname = name.to_owned();
+                            match updated.write(&self.settings_path) {
+                                Ok(()) => {
+                                    self.settings = updated;
+                                    self.status = "Ник сохранён.".into();
+                                }
+                                Err(e) => self.status = format!("Не удалось сохранить ник. {e}"),
+                            }
+                        }
+                        if !valid {
+                            ui.label("Буквы, цифры, пробел, точка, дефис или _");
+                        }
+                    }
                 });
             });
         if !self.games.is_empty() {
@@ -717,6 +891,10 @@ impl App {
                         if let Some(game) = game {
                             ui.add_enabled_ui(idle, |ui| {
                                 self.game_header(ui, &game);
+                                self.group_controls(ui, &game);
+                                if self.demo_mode && game.id == crate::demo::GAME_ID {
+                                    self.demo_controls(ui);
+                                }
                                 ui.add_space(8.0);
                                 if self.show_setup {
                                     self.setup(ui, &game);
@@ -807,7 +985,7 @@ impl App {
 
     fn rescan(&mut self) {
         self.games = catalog::discover(&self.settings.custom_games);
-        self.artwork.refresh();
+        self.artwork.rescan(&self.games);
         if let Some(game) = self
             .games
             .iter()

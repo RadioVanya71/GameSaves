@@ -24,8 +24,10 @@ pub fn deliver(
     sender: Option<&Sender>,
     world: &World,
     source: &Path,
+    author: &str,
 ) -> std::result::Result<String, String> {
-    let archive = snapshots::publish(source, &world.local).map_err(|error| error.to_string())?;
+    let archive =
+        snapshots::publish(source, &world.local, author).map_err(|error| error.to_string())?;
     if sender.is_some_and(|sender| sender.try_direct(world, &archive)) {
         return Ok("Сохранение передано напрямую.".into());
     }
@@ -431,9 +433,10 @@ mod tests {
             endpoint: endpoint.clone(),
         };
         let (copy_from, copy_source) = (from.clone(), source.clone());
-        let status =
-            tokio::task::spawn_blocking(move || deliver(Some(&sender), &copy_from, &copy_source))
-                .await??;
+        let status = tokio::task::spawn_blocking(move || {
+            deliver(Some(&sender), &copy_from, &copy_source, "Друг")
+        })
+        .await??;
         assert_eq!(status, "Сохранение передано напрямую.");
         timeout(CONNECTION_WAIT, accept).await???;
         assert_eq!(snapshots::versions(&to.local)?.len(), 1);
@@ -446,7 +449,8 @@ mod tests {
             endpoint,
         };
         let status =
-            tokio::task::spawn_blocking(move || deliver(Some(&sender), &from, &source)).await??;
+            tokio::task::spawn_blocking(move || deliver(Some(&sender), &from, &source, "Игрок"))
+                .await??;
         assert!(status.contains("записано в общую папку"));
         assert_eq!(snapshots::versions(&shared)?.len(), 1);
         outgoing.close().await;

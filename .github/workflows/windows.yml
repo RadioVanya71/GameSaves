@@ -8,11 +8,15 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'src/**'
+      - 'relay/**'
       - 'README.md'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  GAMESAVES_GROUP_ORIGIN: ${{ vars.GAMESAVES_GROUP_ORIGIN }}
 
 jobs:
   build:
@@ -26,6 +30,10 @@ jobs:
       - name: Install Rust 1.100.0
         shell: pwsh
         run: rustup toolchain install 1.100.0 --profile minimal
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test relay/protocol.test.mjs
       - name: Run tests
         shell: pwsh
         run: cargo +1.100.0 test --locked
@@ -42,3 +50,33 @@ jobs:
           name: GameSaves-windows-x64
           path: dist/
           if-no-files-found: error
+
+  release:
+    name: Publish tested Windows ZIP
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release GameSaves ')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: GameSaves-windows-x64
+          path: dist
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['package']['version'])")
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git log -1 --format=%s)" == "Release GameSaves $version for Windows" ]]
+          asset="GameSaves-v$version-windows-x64.zip"
+          (cd dist && zip -q "../$asset" game-saves.exe README.md OpenSans-LICENSE.txt)
+          unzip -t "$asset"
+          gh release create "v$version" "$asset" --target "$GITHUB_SHA" --title "GameSaves $version" --notes-file RELEASE.md --latest

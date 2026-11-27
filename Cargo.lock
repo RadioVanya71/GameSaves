@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "game-saves"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "eframe",
@@ -1332,6 +1332,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "url",
  "winreg 0.55.0",
  "zip",
 ]

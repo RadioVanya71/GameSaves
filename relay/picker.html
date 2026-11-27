@@ -1,0 +1,20 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><title>GameSaves · Создать группу</title>
+<style>body{font:18px system-ui;margin:8vh auto;padding:24px;max-width:650px;color:#18243a}button,input{font:inherit;padding:12px}input{width:95%}</style>
+<h1>Создать группу</h1><p id="message">Выбери существующую папку на своём Google Диске.</p>
+<button id="choose" disabled>Выбрать папку</button><input id="invite" readonly hidden aria-label="Приглашение в группу">
+<script src="https://apis.google.com/js/api.js"></script><script>
+const [app,key,token]=/*CONFIG*/;
+gapi.load('picker',()=>choose.disabled=false);
+choose.onclick=()=>new google.picker.PickerBuilder().setAppId(app).setDeveloperKey(key).setOAuthToken(token)
+.addView(new google.picker.DocsView(google.picker.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true))
+.setCallback(async result=>{
+ if(result.action!==google.picker.Action.PICKED)return;
+ choose.disabled=true;
+ try {
+ const r=await fetch('/folder',{method:'POST',body:result.docs[0].id});
+ if(!r.ok)throw Error();
+ invite.value=(await r.json()).invite;invite.hidden=false;invite.select();choose.hidden=true;
+ message.textContent='Вставь приглашение в GameSaves и перешли другу. Участники с этой ссылкой могут получать и отправлять версии.';
+ }catch{message.textContent='Не удалось подключить папку. Проверь право добавлять файлы и попробуй ещё раз.';choose.disabled=false;}
+}).build().setVisible(true);
+</script></html>

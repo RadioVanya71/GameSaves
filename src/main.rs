@@ -2,9 +2,12 @@
 
 mod artwork;
 mod catalog;
+mod demo;
+mod group;
 mod peers;
 mod snapshots;
 mod ui;
+mod world_folder;
 
 use catalog::{Game, Settings};
 use eframe::egui;
@@ -13,6 +16,17 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 struct App {
+    nickname_input: String,
+    invitation: String,
+    cloud_list: Option<Receiver<group::Result<Vec<(String, PathBuf)>>>>,
+    cloud_checked: Option<Instant>,
+    cloud_error: String,
+    jump_to_history: bool,
+    demo: demo::Demo,
+    demo_mode: bool,
+    group_origin: Option<String>,
+    friend_window: Option<std::process::Child>,
+    demo_level: String,
     settings: Settings,
     settings_path: PathBuf,
     config_error: Option<String>,
@@ -39,11 +53,25 @@ struct App {
 
 impl App {
     fn new(context: &egui::Context) -> Self {
-        let settings_path = catalog::settings_path();
-        let (settings, config_error) = match Settings::load(&settings_path) {
+        let demo = demo::Demo::new(
+            catalog::settings_path().with_file_name("demo"),
+            std::env::args_os().any(|arg| arg == "--friend"),
+        );
+        let demo_mode = std::env::args_os().any(|a| a == "--demo" || a == "--friend");
+        let setup_error = demo_mode
+            .then(|| demo.prepare().err())
+            .flatten()
+            .map(|e| format!("Не удалось подготовить демоигру. {e}"));
+        let settings_path = if demo_mode {
+            demo.settings_path()
+        } else {
+            catalog::settings_path()
+        };
+        let (mut settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
+        let config_error = setup_error.or(config_error);
         let games = catalog::discover(&settings.custom_games);
         let shared_path = settings.shared_path.to_string_lossy().into_owned();
         let network = settings_path
@@ -53,7 +81,36 @@ impl App {
             context,
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
+        if !snapshots::valid_nickname(&settings.nickname) {
+            settings.nickname = if demo.profile == "friend" {
+                "Друг"
+            } else {
+                "Игрок"
+            }
+            .into();
+        }
         let mut app = Self {
+            nickname_input: settings.nickname.clone(),
+            invitation: String::new(),
+            cloud_list: None,
+            cloud_checked: None,
+            cloud_error: String::new(),
+            jump_to_history: false,
+            demo,
+            demo_mode,
+            group_origin: std::env::var("GAMESAVES_GROUP_ORIGIN")
+                .ok()
+                .or_else(|| option_env!("GAMESAVES_GROUP_ORIGIN").map(str::to_owned))
+                .and_then(|s| url::Url::parse(&s).ok())
+                .filter(|url| {
+                    url.scheme() == "https"
+                        && url.host_str().is_some()
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                })
+                .map(|url| url.origin().ascii_serialization()),
+            friend_window: None,
+            demo_level: String::new(),
             settings,
             settings_path,
             config_error,
@@ -81,7 +138,13 @@ impl App {
         let initial = app
             .games
             .iter()
-            .find(|game| app.settings.save_paths.contains_key(&game.id))
+            .find(|game| {
+                if demo_mode {
+                    game.id == demo::GAME_ID
+                } else {
+                    app.settings.save_paths.contains_key(&game.id)
+                }
+            })
             .or_else(|| app.games.first())
             .map(|game| game.id.clone());
         if let Some(id) = initial {
@@ -117,8 +180,15 @@ impl App {
             .settings
             .save_paths
             .get(&id)
-            .is_some_and(|path| path.is_file())
-            || !self.settings.world_codes.contains_key(&id);
+            .is_some_and(|path| path.is_file() || path.is_dir())
+            || !(self.settings.world_codes.contains_key(&id)
+                || self.settings.groups.contains_key(&id));
+        self.invitation.clear();
+        self.cloud_list = None;
+        self.cloud_checked = None;
+        self.cloud_error.clear();
+        self.versions.clear();
+        self.version = None;
         self.selected = Some(id);
         self.status.clear();
         self.refresh_versions();
@@ -198,6 +268,16 @@ impl App {
 
     fn refresh_versions(&mut self) {
         self.last_refresh = Instant::now();
+        if self.selected.as_deref() == Some(demo::GAME_ID) {
+            self.demo_level = self
+                .demo
+                .level()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "неизвестен".into());
+        }
+        if self.group().is_some() {
+            return;
+        }
         let inspect_older = self
             .version
             .as_ref()
@@ -227,6 +307,47 @@ impl App {
             .or_else(|| self.versions.first().map(|(_, path)| path.clone()));
     }
 
+    fn group(&self) -> Option<group::Group> {
+        group::Group::parse(self.settings.groups.get(self.selected.as_ref()?)?).ok()
+    }
+
+    fn poll_group(&mut self, ctx: &egui::Context) {
+        let Some(group) = self.group() else { return };
+        if let Some(rx) = &self.cloud_list {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(Ok(rows)) => {
+                    self.version = self
+                        .version
+                        .take()
+                        .filter(|v| rows.iter().any(|(_, p)| p == v))
+                        .or_else(|| rows.first().map(|(_, p)| p.clone()));
+                    self.versions = rows;
+                    self.cloud_error.clear();
+                }
+                _ => {
+                    self.cloud_error =
+                        "Не удалось обновить историю группы. Проверь связь или приглашение.".into()
+                }
+            }
+            self.cloud_list = None;
+        }
+        if self
+            .cloud_checked
+            .is_some_and(|t| t.elapsed().as_secs() < 15)
+        {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.cloud_list = Some(rx);
+        self.cloud_checked = Some(Instant::now());
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(group.list());
+            context.request_repaint();
+        });
+    }
+
     fn sync_settings(&mut self, id: &str) {
         let shared = PathBuf::from(self.shared_path.trim());
         let code = self.world_code.trim();
@@ -251,7 +372,7 @@ impl App {
             .settings
             .save_paths
             .get(id)
-            .is_some_and(|path| path.is_file());
+            .is_some_and(|path| path.is_file() || path.is_dir());
         self.status = "Общая папка подключена.".into();
         self.refresh_versions();
     }
@@ -280,6 +401,7 @@ impl App {
             Err(TryRecvError::Empty) => return,
         };
         self.job = None;
+        self.cloud_checked = None;
         self.refresh_versions();
     }
 
@@ -297,21 +419,26 @@ impl App {
                 ui.set_width(460.0);
                 ui.heading("Восстановить сохранение?");
                 ui.label(format!(
-                    "Будет заменён файл {}. Его резервная копия останется рядом.",
+                    "Будет восстановлено сохранение {}. Его резервная копия останется рядом.",
                     destination.display()
                 ));
                 ui.horizontal(|ui| {
                     if ui.button("Восстановить").clicked() {
                         self.restore_confirmation = None;
+                        let group = self.group();
                         self.start_job(ctx, move || {
-                            snapshots::restore(&version, &destination)
-                                .map(|backup| {
-                                    format!(
-                                        "Сохранение восстановлено. Резервная копия: {}",
-                                        backup.display()
-                                    )
-                                })
-                                .map_err(|error| error.to_string())
+                            match group {
+                                Some(g) => g.restore(&version, &destination),
+                                None => snapshots::restore(&version, &destination)
+                                    .map_err(|e| e.to_string()),
+                            }
+                            .map(|backup| {
+                                format!(
+                                    "Сохранение восстановлено. Резервная копия: {}",
+                                    backup.display()
+                                )
+                            })
+                            .map_err(|error| error.to_string())
                         });
                     }
                     if ui.button("Отмена").clicked() {
@@ -330,7 +457,13 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "GameSaves",
+        if std::env::args_os().any(|arg| arg == "--friend") {
+            "GameSaves Demo · Друг"
+        } else if std::env::args_os().any(|arg| arg == "--demo") {
+            "GameSaves Demo · Игрок"
+        } else {
+            "GameSaves"
+        },
         options,
         Box::new(|creation| {
             ui::configure(&creation.egui_ctx);

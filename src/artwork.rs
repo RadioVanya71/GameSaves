@@ -114,6 +114,14 @@ impl Artwork {
             .clone()
     }
 
+    pub fn rescan(&mut self, games: &[Game]) {
+        self.generation += 1;
+        let ids: std::collections::HashSet<_> = games.iter().map(|game| game.id.as_str()).collect();
+        self.entries
+            .retain(|id, texture| texture.is_some() && ids.contains(id.as_str()));
+    }
+
+    #[cfg(windows)]
     pub fn refresh(&mut self) {
         self.generation += 1;
         self.entries.clear();
