@@ -384,6 +384,9 @@ impl App {
                     {
                         self.show_setup = !self.show_setup;
                     }
+                    if ui.button("История версий").clicked() {
+                        self.jump_to_history = true;
+                    }
                 },
             );
         });
@@ -395,6 +398,70 @@ impl App {
         cover(ui, artwork, art.as_ref(), &game.name, 14);
     }
 
+    fn group_controls(&mut self, ui: &mut egui::Ui, game: &Game) {
+        panel().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(heading("Группа Google Диска", 22.0));
+            if let Some(link) = self.settings.groups.get(&game.id).cloned() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Скопировать приглашение").clicked() {
+                        ui.ctx().copy_text(link);
+                    }
+                    if ui.button("Выйти из группы").clicked() {
+                        self.change_group(game, None);
+                    }
+                });
+            } else {
+                let service = option_env!("GAMESAVES_GROUP_ORIGIN").filter(|s| !s.is_empty());
+                if let Some(url) = service {
+                    ui.hyperlink_to(
+                        "Создать группу",
+                        format!("{}/create", url.trim_end_matches('/')),
+                    );
+                } else {
+                    muted(
+                        ui,
+                        "Создание групп станет доступно после подключения сервиса.",
+                    );
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.invitation)
+                            .hint_text("Ссылка-приглашение")
+                            .password(true),
+                    );
+                    if ui.button("Войти по ссылке").clicked() {
+                        let link = self.invitation.trim().to_string();
+                        match crate::group::Group::parse(&link) {
+                            Ok(_) => self.change_group(game, Some(link)),
+                            Err(e) => self.status = e,
+                        }
+                    }
+                });
+            }
+            if !self.cloud_error.is_empty() {
+                ui.label(&self.cloud_error);
+            }
+        });
+    }
+    fn change_group(&mut self, game: &Game, link: Option<String>) {
+        if self.config_error.is_some() {
+            return;
+        }
+        let mut settings = self.settings.clone();
+        if let Some(link) = link {
+            settings.groups.insert(game.id.clone(), link);
+        } else {
+            settings.groups.remove(&game.id);
+        }
+        match settings.write(&self.settings_path) {
+            Ok(()) => {
+                self.settings = settings;
+                self.select(game.id.clone());
+            }
+            Err(e) => self.status = format!("Не удалось записать настройки. {e}"),
+        }
+    }
     fn send_save(&mut self, ui: &mut egui::Ui, game: &Game) {
         let ready_save = self
             .settings
@@ -403,7 +470,8 @@ impl App {
             .filter(|path| path.is_file())
             .cloned();
         let world = self.world();
-        let ready = world.is_some() && ready_save.is_some();
+        let cloud = self.group();
+        let ready = (world.is_some() || cloud.is_some()) && ready_save.is_some();
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
@@ -421,7 +489,10 @@ impl App {
                     .add_enabled(ready, primary("Отправить сохранение"))
                     .clicked()
                 {
-                    if let (Some(world), Some(source)) = (world, ready_save) {
+                    if let (Some(group), Some(source)) = (cloud, ready_save.as_ref()) {
+                        let source = source.clone();
+                        self.start_job(ui.ctx(), move || group.send(&source));
+                    } else if let (Some(world), Some(source)) = (world, ready_save) {
                         let sender = self.network.as_ref().map(peers::Network::sender);
                         self.start_job(ui.ctx(), move || {
                             peers::deliver(sender.as_ref(), &world, &source)
@@ -435,38 +506,35 @@ impl App {
     fn history(&mut self, ui: &mut egui::Ui, game: &Game) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(heading("История версий", 22.0));
+            let title = ui.label(heading("История версий", 22.0));
+            if self.jump_to_history {
+                self.jump_to_history = false;
+                title.scroll_to_me(Some(egui::Align::TOP));
+            }
             if self.versions.is_empty() {
                 muted(ui, "Полученные и отправленные версии появятся здесь.");
                 return;
             }
-            egui::ScrollArea::vertical()
-                .id_salt("versions")
-                .max_height(225.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    for (index, (label, path)) in self.versions.iter().enumerate() {
-                        let selected = Some(path) == self.version.as_ref();
-                        let display = if index == 0 {
-                            format!("{label}  ·  Последняя")
-                        } else {
-                            label.clone()
-                        };
-                        let radio =
-                            egui::RadioButton::new(selected, RichText::new(display).color(TEXT));
-                        if ui
-                            .add(radio)
-                            .on_hover_text(
-                                path.file_name()
-                                    .unwrap_or(path.as_os_str())
-                                    .to_string_lossy(),
-                            )
-                            .clicked()
-                        {
-                            self.version = Some(path.clone());
-                        }
-                    }
-                });
+            for (index, (label, path)) in self.versions.iter().enumerate() {
+                let selected = Some(path) == self.version.as_ref();
+                let display = if index == 0 {
+                    format!("{label}  ·  Последняя")
+                } else {
+                    label.clone()
+                };
+                let radio = egui::RadioButton::new(selected, RichText::new(display).color(TEXT));
+                if ui
+                    .add(radio)
+                    .on_hover_text(
+                        path.file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy(),
+                    )
+                    .clicked()
+                {
+                    self.version = Some(path.clone());
+                }
+            }
             let destination = self
                 .settings
                 .save_paths
@@ -694,6 +762,7 @@ impl App {
     pub(super) fn draw(&mut self, ctx: &egui::Context) {
         self.artwork.poll(ctx);
         self.check_job();
+        self.poll_group(ctx);
         let idle = self.job.is_none();
         if self.selected.is_some() && idle {
             let interval = Duration::from_secs(2);
@@ -769,6 +838,7 @@ impl App {
                         if let Some(game) = game {
                             ui.add_enabled_ui(idle, |ui| {
                                 self.game_header(ui, &game);
+                                self.group_controls(ui, &game);
                                 if game.id == crate::demo::GAME_ID {
                                     self.demo_controls(ui);
                                 }
@@ -862,7 +932,7 @@ impl App {
 
     fn rescan(&mut self) {
         self.games = catalog::discover(&self.settings.custom_games);
-        self.artwork.refresh();
+        self.artwork.rescan(&self.games);
         if let Some(game) = self
             .games
             .iter()

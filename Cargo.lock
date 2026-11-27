@@ -1332,6 +1332,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "url",
  "winreg 0.55.0",
  "zip",
 ]

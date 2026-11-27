@@ -3,6 +3,7 @@
 mod artwork;
 mod catalog;
 mod demo;
+mod group;
 mod peers;
 mod snapshots;
 mod ui;
@@ -14,6 +15,11 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 struct App {
+    invitation: String,
+    cloud_list: Option<Receiver<group::Result<Vec<(String, PathBuf)>>>>,
+    cloud_checked: Option<Instant>,
+    cloud_error: String,
+    jump_to_history: bool,
     demo: demo::Demo,
     friend_window: Option<std::process::Child>,
     demo_level: String,
@@ -67,6 +73,11 @@ impl App {
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
         let mut app = Self {
+            invitation: String::new(),
+            cloud_list: None,
+            cloud_checked: None,
+            cloud_error: String::new(),
+            jump_to_history: false,
             demo,
             friend_window: None,
             demo_level: String::new(),
@@ -135,6 +146,12 @@ impl App {
             .get(&id)
             .is_some_and(|path| path.is_file())
             || !self.settings.world_codes.contains_key(&id);
+        self.invitation.clear();
+        self.cloud_list = None;
+        self.cloud_checked = None;
+        self.cloud_error.clear();
+        self.versions.clear();
+        self.version = None;
         self.selected = Some(id);
         self.status.clear();
         self.refresh_versions();
@@ -221,6 +238,9 @@ impl App {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|_| "неизвестен".into());
         }
+        if self.group().is_some() {
+            return;
+        }
         let inspect_older = self
             .version
             .as_ref()
@@ -248,6 +268,47 @@ impl App {
         self.version = inspect_older
             .filter(|path| self.versions.iter().any(|(_, current)| current == path))
             .or_else(|| self.versions.first().map(|(_, path)| path.clone()));
+    }
+
+    fn group(&self) -> Option<group::Group> {
+        group::Group::parse(self.settings.groups.get(self.selected.as_ref()?)?).ok()
+    }
+
+    fn poll_group(&mut self, ctx: &egui::Context) {
+        let Some(group) = self.group() else { return };
+        if let Some(rx) = &self.cloud_list {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(Ok(rows)) => {
+                    self.version = self
+                        .version
+                        .take()
+                        .filter(|v| rows.iter().any(|(_, p)| p == v))
+                        .or_else(|| rows.first().map(|(_, p)| p.clone()));
+                    self.versions = rows;
+                    self.cloud_error.clear();
+                }
+                _ => {
+                    self.cloud_error =
+                        "Не удалось обновить историю группы. Проверь связь или приглашение.".into()
+                }
+            }
+            self.cloud_list = None;
+        }
+        if self
+            .cloud_checked
+            .is_some_and(|t| t.elapsed().as_secs() < 15)
+        {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.cloud_list = Some(rx);
+        self.cloud_checked = Some(Instant::now());
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(group.list());
+            context.request_repaint();
+        });
     }
 
     fn sync_settings(&mut self, id: &str) {
@@ -303,6 +364,7 @@ impl App {
             Err(TryRecvError::Empty) => return,
         };
         self.job = None;
+        self.cloud_checked = None;
         self.refresh_versions();
     }
 
@@ -326,15 +388,20 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Восстановить").clicked() {
                         self.restore_confirmation = None;
+                        let group = self.group();
                         self.start_job(ctx, move || {
-                            snapshots::restore(&version, &destination)
-                                .map(|backup| {
-                                    format!(
-                                        "Сохранение восстановлено. Резервная копия: {}",
-                                        backup.display()
-                                    )
-                                })
-                                .map_err(|error| error.to_string())
+                            match group {
+                                Some(g) => g.restore(&version, &destination),
+                                None => snapshots::restore(&version, &destination)
+                                    .map_err(|e| e.to_string()),
+                            }
+                            .map(|backup| {
+                                format!(
+                                    "Сохранение восстановлено. Резервная копия: {}",
+                                    backup.display()
+                                )
+                            })
+                            .map_err(|error| error.to_string())
                         });
                     }
                     if ui.button("Отмена").clicked() {

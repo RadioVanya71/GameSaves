@@ -22,7 +22,7 @@ pub fn world_directory(shared: &Path, code: &str) -> Result<PathBuf> {
         .join(format!("world-{}", code.to_ascii_lowercase())))
 }
 
-fn version_timestamp(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn version_timestamp(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let (timestamp, suffix) = name
         .strip_prefix("save-")?
         .strip_suffix(".zip")?

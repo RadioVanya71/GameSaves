@@ -16,6 +16,7 @@ pub struct Game {
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Settings {
+    pub groups: BTreeMap<String, String>,
     pub custom_games: Vec<Game>,
     pub save_paths: BTreeMap<String, PathBuf>,
     pub shared_path: PathBuf,
