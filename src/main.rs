@@ -18,7 +18,8 @@ use std::sync::{
 use std::time::Instant;
 
 struct PendingDriveConnection {
-    result: Receiver<drive::Result<drive::Drive>>,
+    result: Receiver<drive::Result<(drive::Drive, String)>>,
+    selecting_archives: bool,
     cancelled: Arc<AtomicBool>,
 }
 
@@ -212,6 +213,31 @@ impl App {
         folder: Option<String>,
         ctx: &egui::Context,
     ) {
+        self.start_drive_selection(ctx, false, move |cancelled| {
+            let drive = drive::Drive::connect(client, folder.as_deref(), cancelled)?;
+            Ok((drive, "Google Диск подключён.".into()))
+        });
+    }
+
+    fn start_archive_selection(&mut self, game: &Game, ctx: &egui::Context) {
+        if let Some(drive) = self.drive.clone() {
+            let key = drive::game_key(game);
+            self.start_drive_selection(ctx, true, move |cancelled| {
+                let (drive, count) = drive.add_archives(&key, cancelled)?;
+                Ok((
+                    drive,
+                    format!("Выбрано архивов: {count}. Обновляю историю."),
+                ))
+            });
+        }
+    }
+
+    fn start_drive_selection(
+        &mut self,
+        ctx: &egui::Context,
+        selecting_archives: bool,
+        job: impl FnOnce(&AtomicBool) -> drive::Result<(drive::Drive, String)> + Send + 'static,
+    ) {
         if self.connect_drive.is_some() {
             return;
         }
@@ -220,11 +246,12 @@ impl App {
         let cancelled = Arc::new(AtomicBool::new(false));
         self.connect_drive = Some(PendingDriveConnection {
             result: rx,
+            selecting_archives,
             cancelled: cancelled.clone(),
         });
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(drive::Drive::connect(client, folder.as_deref(), &cancelled));
+            let _ = tx.send(job(&cancelled));
             context.request_repaint();
         });
     }
@@ -232,7 +259,9 @@ impl App {
     fn cancel_drive_connection(&mut self) {
         if let Some(pending) = self.connect_drive.take() {
             pending.cancelled.store(true, Ordering::Relaxed);
-            self.status = if self.drive.is_some() {
+            self.status = if pending.selecting_archives {
+                "Выбор архивов отменён."
+            } else if self.drive.is_some() {
                 "Смена папки отменена."
             } else {
                 "Подключение Google Диска отменено."
@@ -253,7 +282,7 @@ impl App {
     fn poll_drive(&mut self, ctx: &egui::Context) {
         if let Some(pending) = &self.connect_drive {
             match pending.result.try_recv() {
-                Ok(Ok(new_drive)) => {
+                Ok(Ok((new_drive, message))) => {
                     self.connect_drive = None;
                     match drive::save(
                         &self.settings_path.with_file_name("google-drive.dat"),
@@ -263,14 +292,19 @@ impl App {
                             self.drive = Some(new_drive);
                             self.drive_folder_link.clear();
                             self.reset_drive_history();
-                            self.status = "Google Диск подключён.".into();
+                            self.status = message;
                         }
                         Err(e) => self.cloud_error = e,
                     }
                 }
                 Ok(Err(e)) => {
+                    let selecting_archives = pending.selecting_archives;
                     self.connect_drive = None;
-                    self.cloud_error = e;
+                    if selecting_archives {
+                        self.status = format!("Не удалось добавить архивы. {e}");
+                    } else {
+                        self.cloud_error = e;
+                    }
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.connect_drive = None;

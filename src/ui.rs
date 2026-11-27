@@ -361,10 +361,15 @@ impl App {
                     ui.hyperlink_to(&drive.folder.name, drive.folder.link());
                 });
             }
-            if self.connect_drive.is_some() {
+            if let Some(pending) = &self.connect_drive {
+                let instructions = if pending.selecting_archives {
+                    "Выбери архивы в браузере."
+                } else {
+                    "Разреши доступ и выбери папку в браузере."
+                };
                 ui.horizontal_wrapped(|ui| {
                     ui.spinner();
-                    ui.label("Разреши доступ и выбери папку в браузере.");
+                    ui.label(instructions);
                     if ui.button("Отменить").clicked() {
                         self.cancel_drive_connection();
                     }
@@ -502,8 +507,17 @@ impl App {
                 self.jump_to_history = false;
                 title.scroll_to_me(Some(egui::Align::TOP));
             }
+            if self.drive.is_some() {
+                let selecting = self.connect_drive.as_ref().is_some_and(|pending| pending.selecting_archives);
+                if selecting {
+                    muted(ui, "Выбери архивы из общей папки в окне Google.");
+                    if ui.button("Отменить").clicked() { self.cancel_drive_connection(); }
+                } else if ui.add_enabled(self.connect_drive.is_none(), egui::Button::new("Добавить архивы с Диска")).clicked() {
+                    self.start_archive_selection(game, ui.ctx());
+                }
+            }
             if self.versions.is_empty() {
-                muted(ui, "Полученные и отправленные версии появятся здесь.");
+                muted(ui, "Здесь пока нет доступных версий. Если архив друга уже лежит в папке, нажми «Добавить архивы с Диска».");
                 return;
             }
             for (index, (label, path)) in self.versions.iter().enumerate() {

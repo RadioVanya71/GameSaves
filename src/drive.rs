@@ -26,6 +26,8 @@ pub struct Drive {
     client: Client,
     refresh: String,
     pub folder: Folder,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    selected_archives: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     #[serde(skip)]
     access: Arc<Mutex<Option<Access>>>,
 }
@@ -60,7 +62,12 @@ impl Drive {
         requested_folder: Option<&str>,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<Self> {
-        let (tokens, folder_id) = oauth::authorize(&client, requested_folder, cancelled)?;
+        let (tokens, mut ids) = oauth::authorize(
+            &client,
+            oauth::Selection::Folder(requested_folder),
+            cancelled,
+        )?;
+        let folder_id = ids.pop().ok_or("Выбери папку.")?;
         let refresh = tokens
             .refresh_token
             .ok_or("Google не выдал долгосрочный доступ. Повтори подключение.")?;
@@ -96,6 +103,7 @@ impl Drive {
                 id: folder_id,
                 name: metadata.name,
             },
+            selected_archives: Default::default(),
             access: Arc::new(Mutex::new(Some(Access::new(
                 tokens.access_token,
                 tokens.expires_in,
@@ -180,6 +188,72 @@ impl Drive {
         Ok("Сохранение загружено на Google Диск.".into())
     }
 
+    pub fn add_archives(
+        mut self,
+        game: &str,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(Self, usize)> {
+        let current = self.token()?;
+        let (tokens, ids) = oauth::authorize(&self.client, oauth::Selection::Archives, cancelled)?;
+        oauth::check_cancelled(cancelled)?;
+        let agent = http(30);
+        let account = |token: &str| -> Result<String> {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct User {
+                permission_id: String,
+            }
+            #[derive(Deserialize)]
+            struct About {
+                user: User,
+            }
+            let info: About = json(
+                agent
+                    .get("https://www.googleapis.com/drive/v3/about?fields=user(permissionId)")
+                    .header("Authorization", bearer(token))
+                    .call()
+                    .map_err(request_error)?,
+            )?;
+            Ok(info.user.permission_id)
+        };
+        if account(&current)? != account(&tokens.access_token)? {
+            return Err("Выбери тот же Google-аккаунт, которым подключена папка.".into());
+        }
+        let mut selected = std::collections::BTreeSet::new();
+        for id in ids {
+            oauth::check_cancelled(cancelled)?;
+            let remote: RemoteFile = json(agent.get(format!("{FILES}/{id}?supportsAllDrives=true&fields=id,name,parents,appProperties,trashed"))
+                .header("Authorization", bearer(&tokens.access_token)).call().map_err(request_error)?)?;
+            if !remote.trashed
+                && remote.id == id
+                && remote.parents.contains(&self.folder.id)
+                && remote
+                    .app_properties
+                    .get("gamesaves")
+                    .is_none_or(|tag| tag == game)
+                && snapshots::version_timestamp(&remote.name).is_some()
+            {
+                selected.insert(remote.id);
+            }
+        }
+        if selected.is_empty() {
+            return Err("Выбери ZIP-архивы GameSaves для этой игры из подключённой папки.".into());
+        }
+        let count = selected.len();
+        self.selected_archives
+            .entry(game.into())
+            .or_default()
+            .extend(selected);
+        if let Some(refresh) = tokens.refresh_token {
+            self.refresh = refresh;
+        }
+        self.access = Arc::new(Mutex::new(Some(Access::new(
+            tokens.access_token,
+            tokens.expires_in,
+        ))));
+        Ok((self, count))
+    }
+
     pub fn list(&self, game: &str) -> Result<Vec<(String, PathBuf)>> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -193,8 +267,12 @@ impl Drive {
         let mut page_token: Option<String> = None;
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
+        let explicit = self
+            .selected_archives
+            .get(game)
+            .filter(|ids| !ids.is_empty());
         loop {
-            let mut url = list_url(&self.folder.id, game)?;
+            let mut url = list_url(&self.folder.id, explicit.is_none().then_some(game))?;
             if let Some(next) = &page_token {
                 url.query_pairs_mut().append_pair("pageToken", next);
             }
@@ -204,7 +282,12 @@ impl Drive {
                 .call()
                 .map_err(request_error)?;
             let page: Page = json(response)?;
-            rows.extend(page.files.into_iter().filter_map(RemoteFile::row));
+            rows.extend(
+                page.files
+                    .into_iter()
+                    .filter(|file| file.matches_game(game, explicit))
+                    .filter_map(RemoteFile::row),
+            );
             match page.next_page_token {
                 Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
                     page_token = Some(next)
@@ -258,13 +341,16 @@ impl Drive {
     }
 }
 
-fn list_url(folder: &str, game: &str) -> Result<Url> {
-    if !valid_id(folder) || !valid_id(game) {
+fn list_url(folder: &str, game: Option<&str>) -> Result<Url> {
+    if !valid_id(folder) || game.is_some_and(|key| !valid_id(key)) {
         return Err("Некорректный идентификатор папки или игры.".into());
     }
-    let query = format!(
-        "'{folder}' in parents and trashed = false and appProperties has {{ key='gamesaves' and value='{game}' }}"
-    );
+    let mut query = format!("'{folder}' in parents and trashed = false");
+    if let Some(game) = game {
+        query.push_str(&format!(
+            " and appProperties has {{ key='gamesaves' and value='{game}' }}"
+        ));
+    }
     let mut url = Url::parse(FILES).unwrap();
     url.query_pairs_mut()
         .append_pair("q", &query)
@@ -281,9 +367,24 @@ struct RemoteFile {
     id: String,
     name: String,
     #[serde(default)]
+    parents: Vec<String>,
+    #[serde(default)]
+    trashed: bool,
+    #[serde(default)]
     app_properties: std::collections::BTreeMap<String, String>,
 }
 impl RemoteFile {
+    fn matches_game(
+        &self,
+        game: &str,
+        explicit: Option<&std::collections::BTreeSet<String>>,
+    ) -> bool {
+        match self.app_properties.get("gamesaves") {
+            Some(tag) => tag == game,
+            None => explicit.is_some_and(|ids| ids.contains(&self.id)),
+        }
+    }
+
     fn row(self) -> Option<(String, PathBuf)> {
         if !valid_id(&self.id) {
             return None;
@@ -497,14 +598,16 @@ mod tests {
     }
     #[test]
     fn history_request_and_rows_use_safe_ids() -> Result<()> {
-        assert!(list_url("../../outside", "game").is_err());
-        let url = list_url("folder", "game")?;
+        assert!(list_url("../../outside", Some("game")).is_err());
+        let url = list_url("folder", Some("game"))?;
         assert!(url.query_pairs().any(|(key, value)| key == "q"
             && value.contains("'folder' in parents")
             && value.contains("value='game'")));
         let row = RemoteFile {
             id: "download-id".into(),
             name: "save-001234567890123-ver.zip".into(),
+            parents: vec![],
+            trashed: false,
             app_properties: [("author".into(), "Ваня".into())].into(),
         }
         .row()
@@ -515,5 +618,18 @@ mod tests {
             PathBuf::from("download-id").join("save-001234567890123-ver.zip")
         );
         Ok(())
+    }
+    #[test]
+    fn manually_selected_archive_can_join_only_the_intended_history() {
+        let mut file: RemoteFile = serde_json::from_value(serde_json::json!({
+            "id":"archive1", "name":"save-001234567890123-ver.zip"
+        }))
+        .unwrap();
+        assert!(!file.matches_game("playing", None));
+        let selected = ["archive1".into()].into();
+        assert!(file.matches_game("playing", Some(&selected)));
+        file.app_properties
+            .insert("gamesaves".into(), "different".into());
+        assert!(!file.matches_game("playing", Some(&selected)));
     }
 }
