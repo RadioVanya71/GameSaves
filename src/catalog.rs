@@ -20,6 +20,7 @@ pub struct Settings {
     pub save_paths: BTreeMap<String, PathBuf>,
     pub shared_path: PathBuf,
     pub world_codes: BTreeMap<String, String>,
+    pub covers: BTreeMap<String, PathBuf>,
 }
 
 impl Settings {

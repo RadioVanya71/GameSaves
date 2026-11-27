@@ -22,7 +22,7 @@ pub fn world_directory(shared: &Path, code: &str) -> Result<PathBuf> {
         .join(format!("world-{}", code.to_ascii_lowercase())))
 }
 
-fn version_parts(name: &str) -> Option<(chrono::DateTime<chrono::Utc>, &str)> {
+fn version_timestamp(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let (timestamp, suffix) = name
         .strip_prefix("save-")?
         .strip_suffix(".zip")?
@@ -35,14 +35,11 @@ fn version_parts(name: &str) -> Option<(chrono::DateTime<chrono::Utc>, &str)> {
     {
         return None;
     }
-    Some((
-        chrono::DateTime::from_timestamp_millis(timestamp.parse().ok()?)?,
-        suffix,
-    ))
+    chrono::DateTime::from_timestamp_millis(timestamp.parse().ok()?)
 }
 
 pub fn valid_version_name(name: &str) -> bool {
-    version_parts(name).is_some()
+    version_timestamp(name).is_some()
 }
 
 pub fn versions(directory: &Path) -> io::Result<Vec<(String, PathBuf)>> {
@@ -58,12 +55,14 @@ pub fn versions(directory: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        let Some((date, suffix)) = version_parts(name) else {
+        let Some(date) = version_timestamp(name) else {
             continue;
         };
         if entry.file_type()?.is_file() {
             versions.push((
-                format!("{} UTC · {suffix}", date.format("%d.%m.%Y %H:%M:%S")),
+                date.with_timezone(&chrono::Local)
+                    .format("%d.%m.%Y · %H:%M:%S")
+                    .to_string(),
                 path,
             ));
         }

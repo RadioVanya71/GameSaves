@@ -37,9 +37,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist
           Copy-Item target/release/game-saves.exe, README.md -Destination dist
-          Compress-Archive -Path dist/* -DestinationPath GameSaves-windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:
           name: GameSaves-windows-x64
-          path: GameSaves-windows-x64.zip
+          path: dist/
           if-no-files-found: error

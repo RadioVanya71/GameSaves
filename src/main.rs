@@ -1,20 +1,25 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod artwork;
 mod catalog;
 mod peers;
 mod snapshots;
+mod ui;
 
 use catalog::{Game, Settings};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 struct App {
     settings: Settings,
     settings_path: PathBuf,
     config_error: Option<String>,
     games: Vec<Game>,
+    artwork: artwork::Artwork,
+    show_setup: bool,
+    show_add: bool,
     search: String,
     selected: Option<String>,
     save_path: String,
@@ -33,7 +38,7 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(context: &egui::Context) -> Self {
         let settings_path = catalog::settings_path();
         let (settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
@@ -44,11 +49,18 @@ impl App {
         let network = settings_path
             .parent()
             .and_then(|path| peers::Network::start(path.to_path_buf()).ok());
-        let app = Self {
+        let artwork = artwork::Artwork::new(
+            context,
+            settings_path.parent().unwrap_or(std::path::Path::new(".")),
+        );
+        let mut app = Self {
             settings,
             settings_path,
             config_error,
             games,
+            artwork,
+            show_setup: false,
+            show_add: false,
             search: String::new(),
             selected: None,
             save_path: String::new(),
@@ -66,6 +78,15 @@ impl App {
             status: String::new(),
         };
         app.configure_network();
+        let initial = app
+            .games
+            .iter()
+            .find(|game| app.settings.save_paths.contains_key(&game.id))
+            .or_else(|| app.games.first())
+            .map(|game| game.id.clone());
+        if let Some(id) = initial {
+            app.select(id);
+        }
         app
     }
 
@@ -92,6 +113,12 @@ impl App {
                         .to_ascii_lowercase()
                 })
             });
+        self.show_setup = !self
+            .settings
+            .save_paths
+            .get(&id)
+            .is_some_and(|path| path.is_file())
+            || !self.settings.world_codes.contains_key(&id);
         self.selected = Some(id);
         self.status.clear();
         self.refresh_versions();
@@ -109,7 +136,7 @@ impl App {
             self.settings.custom_games.push(Game {
                 id: id.clone(),
                 name: name.into(),
-                store: "Добавлена вручную".into(),
+                store: "Вручную".into(),
                 install_dir: directory,
             });
             if let Err(error) = self.settings.write(&self.settings_path) {
@@ -122,6 +149,7 @@ impl App {
         self.search.clear();
         self.new_game_name.clear();
         self.new_game_dir.clear();
+        self.show_add = false;
         self.select(id);
         self.status = "Игра добавлена.".into();
     }
@@ -142,96 +170,6 @@ impl App {
                     self.settings.save_paths.remove(id);
                 }
                 self.status = format!("Не удалось сохранить путь. {error}");
-            }
-        }
-    }
-
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Мои игры");
-        ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Поиск"));
-        if ui.button("Обновить список").clicked() {
-            self.games = catalog::discover(&self.settings.custom_games);
-            if let Some(game) = self
-                .games
-                .iter()
-                .find(|game| Some(&game.id) == self.selected.as_ref())
-            {
-                self.candidates = catalog::save_candidates(game);
-            }
-        }
-        ui.separator();
-        let query = self.search.trim().to_lowercase();
-        let mut selection = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut matches = 0;
-            for game in &self.games {
-                if game.name.to_lowercase().contains(&query) {
-                    matches += 1;
-                    let selected = self.selected.as_ref() == Some(&game.id);
-                    let label = format!("{} · {}", game.name, game.store);
-                    if ui.selectable_label(selected, label).clicked() {
-                        selection = Some(game.id.clone());
-                    }
-                }
-            }
-            if matches == 0 {
-                ui.label("Игры не найдены.");
-            }
-        });
-        if let Some(id) = selection {
-            self.select(id);
-        }
-    }
-
-    fn manual_game(&mut self, ui: &mut egui::Ui) {
-        ui.collapsing("Добавить игру вручную", |ui| {
-            ui.label("Название");
-            ui.text_edit_singleline(&mut self.new_game_name);
-            ui.label("Папка установки");
-            path_field(ui, &mut self.new_game_dir, false);
-            if ui
-                .add_enabled(self.config_error.is_none(), egui::Button::new("Добавить"))
-                .clicked()
-            {
-                self.add_game();
-            }
-        });
-    }
-
-    fn game_details(&mut self, ui: &mut egui::Ui, game: &Game) {
-        ui.heading(&game.name);
-        ui.label(&game.store);
-        ui.label(format!("Папка установки: {}", game.install_dir.display()));
-        ui.add_space(16.0);
-        ui.heading("Сохранения");
-        if self.candidates.is_empty() {
-            ui.label("Укажи файл или папку сохранений игры.");
-        } else {
-            egui::ComboBox::from_id_salt("save-candidates")
-                .selected_text("Найденные сохранения")
-                .show_ui(ui, |ui| {
-                    for candidate in &self.candidates {
-                        let path = candidate.to_string_lossy().into_owned();
-                        if ui.selectable_label(self.save_path == path, &path).clicked() {
-                            self.save_path = path;
-                        }
-                    }
-                });
-        }
-        path_field(ui, &mut self.save_path, true);
-        if ui
-            .add_enabled(
-                self.config_error.is_none(),
-                egui::Button::new("Запомнить путь"),
-            )
-            .clicked()
-        {
-            self.remember_path(&game.id);
-        }
-        if let Some(path) = self.settings.save_paths.get(&game.id) {
-            ui.label(format!("Сохранённый путь: {}", path.display()));
-            if !path.exists() {
-                ui.label("Этот путь больше недоступен. Выбери новый.");
             }
         }
     }
@@ -309,7 +247,12 @@ impl App {
         }
         self.settings = updated;
         self.configure_network();
-        self.status.clear();
+        self.show_setup = !self
+            .settings
+            .save_paths
+            .get(id)
+            .is_some_and(|path| path.is_file());
+        self.status = "Общая папка подключена.".into();
         self.refresh_versions();
     }
 
@@ -338,85 +281,6 @@ impl App {
         };
         self.job = None;
         self.refresh_versions();
-    }
-
-    fn sync_panel(&mut self, ui: &mut egui::Ui, game: &Game) {
-        ui.add_space(16.0);
-        ui.heading("Обмен сохранениями");
-        let world = self.world();
-        egui::CollapsingHeader::new("Настройка обмена")
-            .id_salt(&game.id)
-            .default_open(world.is_none())
-            .show(ui, |ui| {
-                ui.label("Выберите одну общую папку и одинаковый код мира на обоих ПК.");
-                path_field(ui, &mut self.shared_path, false);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Код мира");
-                    ui.text_edit_singleline(&mut self.world_code);
-                    if ui
-                        .add_enabled(
-                            self.config_error.is_none(),
-                            egui::Button::new("Подключить папку"),
-                        )
-                        .clicked()
-                    {
-                        self.sync_settings(&game.id);
-                    }
-                });
-            });
-
-        let Some(world) = world else {
-            return;
-        };
-        let chosen = self
-            .settings
-            .save_paths
-            .get(&game.id)
-            .filter(|path| path.is_file())
-            .cloned();
-        if chosen.is_none() {
-            ui.label("Для обмена выбери и запомни конкретный файл сохранения. Папки можно сохранять в каталоге игр.");
-        }
-        ui.label("Закрой игру перед отправкой или восстановлением.");
-        if ui
-            .add_enabled(chosen.is_some(), egui::Button::new("Отправить сохранение"))
-            .clicked()
-        {
-            if let Some(source) = chosen.clone() {
-                let sender = self.network.as_ref().map(peers::Network::sender);
-                self.start_job(ui.ctx(), move || {
-                    peers::deliver(sender.as_ref(), &world, &source)
-                });
-            }
-        }
-        if self.versions.is_empty() {
-            ui.label("Пока нет версий сохранения.");
-            return;
-        }
-        ui.horizontal_wrapped(|ui| {
-            let label = self
-                .versions
-                .iter()
-                .find(|(_, path)| Some(path) == self.version.as_ref())
-                .map_or("Выбери версию", |(label, _)| label);
-            egui::ComboBox::from_id_salt("shared-versions")
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    for (label, path) in &self.versions {
-                        if ui
-                            .selectable_label(Some(path) == self.version.as_ref(), label)
-                            .clicked()
-                        {
-                            self.version = Some(path.clone());
-                        }
-                    }
-                });
-            if let (Some(version), Some(destination)) = (self.version.clone(), chosen) {
-                if ui.button("Восстановить версию").clicked() {
-                    self.restore_confirmation = Some((version, destination));
-                }
-            }
-        });
     }
 
     fn confirm_restore(&mut self, ctx: &egui::Context) {
@@ -451,93 +315,19 @@ impl App {
     }
 }
 
-fn path_field(ui: &mut egui::Ui, path: &mut String, allow_file: bool) {
-    ui.horizontal_wrapped(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(path)
-                .desired_width(340.0)
-                .hint_text("Полный путь"),
-        );
-        #[cfg(windows)]
-        {
-            if ui.button("Выбрать папку").clicked() {
-                if let Some(directory) = rfd::FileDialog::new().pick_folder() {
-                    *path = directory.to_string_lossy().into_owned();
-                }
-            }
-            if allow_file && ui.button("Выбрать файл").clicked() {
-                if let Some(file) = rfd::FileDialog::new().pick_file() {
-                    *path = file.to_string_lossy().into_owned();
-                }
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = allow_file;
-    });
-}
-
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.check_job();
-        let idle = self.job.is_none();
-        if self.selected.is_some() && idle {
-            let interval = Duration::from_secs(2);
-            if self.last_refresh.elapsed() >= interval {
-                self.refresh_versions();
-            }
-            ctx.request_repaint_after(interval.saturating_sub(self.last_refresh.elapsed()));
-        }
-        egui::SidePanel::left("game-list")
-            .default_width(245.0)
-            .show(ctx, |ui| {
-                ui.add_enabled_ui(idle, |ui| self.sidebar(ui));
-            });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(8.0);
-                ui.add_enabled_ui(idle, |ui| self.manual_game(ui));
-                ui.separator();
-                if let Some(error) = &self.config_error {
-                    ui.label(format!(
-                        "Не удалось открыть настройки {}. {}",
-                        self.settings_path.display(),
-                        error
-                    ));
-                }
-                let game = self
-                    .selected
-                    .as_ref()
-                    .and_then(|id| self.games.iter().find(|game| game.id == *id))
-                    .cloned();
-                if let Some(game) = game {
-                    ui.add_enabled_ui(idle, |ui| {
-                        self.game_details(ui, &game);
-                        self.sync_panel(ui, &game);
-                    });
-                } else {
-                    ui.heading("Выбери игру из списка");
-                    ui.label("Если игры нет в списке, добавь её вручную.");
-                }
-                if !self.status.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(&self.status);
-                }
-            });
-        });
-        self.confirm_restore(ctx);
-    }
-}
-
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([940.0, 720.0])
-            .with_min_inner_size([715.0, 420.0]),
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([840.0, 560.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Игровые сохранения",
+        "GameSaves",
         options,
-        Box::new(|_| Ok(Box::new(App::new()))),
+        Box::new(|creation| {
+            ui::configure(&creation.egui_ctx);
+            Ok(Box::new(App::new(&creation.egui_ctx)))
+        }),
     )
 }
