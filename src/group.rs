@@ -52,7 +52,7 @@ impl Group {
     pub fn list(&self) -> Result<Vec<(String, PathBuf)>> {
         let mut r = self
             .http()
-            .get(&self.base)
+            .get(format!("{}?authors=1", self.base))
             .header("Authorization", &self.auth)
             .call()
             .map_err(err)?;
@@ -65,23 +65,34 @@ impl Group {
             .limit(4 * 1024 * 1024)
             .read_to_vec()
             .map_err(err)?;
-        let names: Vec<String> = serde_json::from_slice(&data).map_err(err)?;
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Entry {
+            Named {
+                name: String,
+                author: Option<String>,
+            },
+            Legacy(String),
+        }
+        let names: Vec<Entry> = serde_json::from_slice(&data).map_err(err)?;
         let mut rows = Vec::new();
-        for name in names {
+        for entry in names {
+            let (name, author) = match entry {
+                Entry::Named { name, author } => (name, author),
+                Entry::Legacy(name) => (name, None),
+            };
             let date = snapshots::version_timestamp(&name).ok_or("Некорректное имя версии.")?;
             rows.push((
-                date.with_timezone(&chrono::Local)
-                    .format("%d.%m.%Y · %H:%M:%S")
-                    .to_string(),
+                snapshots::version_label(date, author.as_deref()),
                 PathBuf::from(name),
             ));
         }
         rows.sort_by(|a, b| b.1.cmp(&a.1));
         Ok(rows)
     }
-    pub fn send(&self, source: &Path) -> Result<String> {
+    pub fn send(&self, source: &Path, author: &str) -> Result<String> {
         let tmp = tempfile::tempdir().map_err(err)?;
-        let archive = snapshots::publish(source, tmp.path()).map_err(err)?;
+        let archive = snapshots::publish(source, tmp.path(), author).map_err(err)?;
         if fs::metadata(&archive).map_err(err)?.len() > LIMIT {
             return Err("Архив превышает лимит тестовой группы в 32 МиБ.".into());
         }

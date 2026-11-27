@@ -6,7 +6,10 @@ test('owner selects folder, invited friend reads an uploaded version, other grou
   const origin='https://groups.example';
   Object.assign(process.env,{PORT:'0',DATABASE:':memory:',STORE_KEY:randomBytes(32).toString('hex'),PUBLIC_ORIGIN:origin,PROJECT_NUMBER:'123',GOOGLE_CLIENT_ID:'test',GOOGLE_CLIENT_SECRET:'test',PICKER_KEY:'test'});
   const realFetch=globalThis.fetch;
-  const zip=Buffer.alloc(32);zip.writeUInt32LE(0x04034b50);
+  const comment=Buffer.from('GameSaves/author=Ваня');
+  const zip=Buffer.alloc(32+22+comment.length);
+  zip.writeUInt32LE(0x04034b50);zip.writeUInt32LE(0x06054b50,32);
+  zip.writeUInt16LE(comment.length,52);comment.copy(zip,54);
   t.mock.method(globalThis,'fetch',async(url,options)=>{
     if(url==='https://oauth2.googleapis.com/token') return Response.json({access_token:'access',refresh_token:'refresh'});
     assert.equal(options.headers.Authorization,'Bearer access');
@@ -34,6 +37,7 @@ test('owner selects folder, invited friend reads an uploaded version, other grou
   assert.equal((await request('/versions')).status,401);
   assert.equal((await request(path,{method:'PUT',headers,body:zip})).status,201);
   assert.deepEqual(await (await request('/versions',{headers})).json(),[name]);
+  assert.deepEqual(await (await request('/versions?authors=1',{headers})).json(),[{name,author:'Ваня'}]);
   assert.deepEqual(Buffer.from(await(await request(path,{headers})).arrayBuffer()),zip);
   assert.equal((await request(path,{headers:other})).status,404);
 });

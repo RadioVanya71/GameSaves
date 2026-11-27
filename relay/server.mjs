@@ -15,6 +15,19 @@ const db = new DatabaseSync(env.DATABASE);
 db.exec(`PRAGMA journal_mode=WAL;
   CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, folder TEXT NOT NULL, credential TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS versions (grp TEXT NOT NULL, name TEXT NOT NULL, file TEXT NOT NULL, PRIMARY KEY(grp,name));`);
+if (!db.prepare('PRAGMA table_info(versions)').all().some(col=>col.name==='author')) {
+  db.exec('ALTER TABLE versions ADD COLUMN author TEXT');
+}
+function archiveAuthor(archive) {
+  // GameSaves places a short UTF-8 comment at the very end of the ZIP.
+  for (let i=archive.length-22; i>=Math.max(0,archive.length-160); i--) {
+    if(archive.readUInt32LE(i)!==0x06054b50 || i+22+archive.readUInt16LE(i+20)!==archive.length) continue;
+    const comment=archive.toString('utf8',i+22);
+    const m=/^GameSaves\/author=([\p{L}\p{N} ._-]{1,24})$/u.exec(comment);
+    return m && m[1].trim()===m[1] ? m[1] : null;
+  }
+  return null;
+}
 const sessions = new Map();
 const nonce = () => randomBytes(32).toString('base64url');
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -103,7 +116,10 @@ async function serve(req,res) {
   if(!token) fail(401);
   const group=db.prepare('SELECT * FROM groups WHERE id=?').get(hash(token));
   if(!group) fail(403);
-  if(parts.length===2 && req.method==='GET') return json(db.prepare('SELECT name FROM versions WHERE grp=? ORDER BY name DESC').all(group.id).map(row=>row.name));
+  if(parts.length===2 && req.method==='GET') {
+    const rows=db.prepare('SELECT name,author FROM versions WHERE grp=? ORDER BY name DESC').all(group.id);
+    return json(url.searchParams.get('authors')==='1' ? rows : rows.map(row=>row.name));
+  }
   const name=parts[2];
   if(!namePattern.test(name||'')) fail(400);
   const existing=db.prepare('SELECT file FROM versions WHERE grp=? AND name=?').get(group.id,name);
@@ -125,7 +141,7 @@ async function serve(req,res) {
   const pre='--'+boundary+'\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify(meta)+'\r\n--'+boundary+'\r\nContent-Type: application/zip\r\n\r\n';
   const multi=Buffer.concat([Buffer.from(pre),archive,Buffer.from('\r\n--'+boundary+'--\r\n')]);
   const saved=await (await google('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id',{method:'POST',headers:{...headers,'Content-Type':'multipart/related; boundary='+boundary},body:multi})).json();
-  db.prepare('INSERT INTO versions VALUES(?,?,?)').run(group.id,name,saved.id);
+  db.prepare('INSERT INTO versions(grp,name,file,author) VALUES(?,?,?,?)').run(group.id,name,saved.id,archiveAuthor(archive));
   res.writeHead(201);res.end();
 }
 export const server=http.createServer((req,res)=>serve(req,res).catch(e=>{res.writeHead(e.status||500);res.end('Не удалось выполнить запрос.');})).listen(Number(env.PORT||8080));

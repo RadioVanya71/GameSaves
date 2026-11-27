@@ -502,13 +502,14 @@ impl App {
                     .add_enabled(ready, primary("Отправить сохранение"))
                     .clicked()
                 {
+                    let author = self.settings.nickname.clone();
                     if let (Some(group), Some(source)) = (cloud, ready_save.as_ref()) {
                         let source = source.clone();
-                        self.start_job(ui.ctx(), move || group.send(&source));
+                        self.start_job(ui.ctx(), move || group.send(&source, &author));
                     } else if let (Some(world), Some(source)) = (world, ready_save) {
                         let sender = self.network.as_ref().map(peers::Network::sender);
                         self.start_job(ui.ctx(), move || {
-                            peers::deliver(sender.as_ref(), &world, &source)
+                            peers::deliver(sender.as_ref(), &world, &source, &author)
                         });
                     }
                 }
@@ -808,6 +809,37 @@ impl App {
                         );
                     }
                     ui.label(heading("GameSaves", 24.0));
+                    ui.separator();
+                    ui.label("Мой ник");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.nickname_input)
+                            .char_limit(24)
+                            .desired_width(155.0),
+                    );
+                    let name = self.nickname_input.trim();
+                    if self.settings.nickname != name {
+                        let valid = crate::snapshots::valid_nickname(name);
+                        if ui
+                            .add_enabled(
+                                valid && self.config_error.is_none(),
+                                egui::Button::new("Сохранить"),
+                            )
+                            .clicked()
+                        {
+                            let mut updated = self.settings.clone();
+                            updated.nickname = name.to_owned();
+                            match updated.write(&self.settings_path) {
+                                Ok(()) => {
+                                    self.settings = updated;
+                                    self.status = "Ник сохранён.".into();
+                                }
+                                Err(e) => self.status = format!("Не удалось сохранить ник. {e}"),
+                            }
+                        }
+                        if !valid {
+                            ui.label("Буквы, цифры, пробел, точка, дефис или _");
+                        }
+                    }
                 });
             });
         if !self.games.is_empty() {

@@ -112,7 +112,7 @@ mod tests {
         let settings = Settings::load(&player.settings_path()).unwrap();
         let shared = snapshots::world_directory(&settings.shared_path, WORLD_CODE).unwrap();
         let world = peers::World::new(shared, player.settings_path().parent().unwrap()).unwrap();
-        peers::deliver(None, &world, &player.save()).unwrap();
+        peers::deliver(None, &world, &player.save(), "Игрок").unwrap();
         let archive = snapshots::versions(&world.shared).unwrap().pop().unwrap().1;
         let backup = snapshots::restore(&archive, &friend.save()).unwrap();
         assert_eq!(friend.level().unwrap(), 2);

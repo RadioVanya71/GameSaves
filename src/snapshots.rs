@@ -42,6 +42,33 @@ pub fn valid_version_name(name: &str) -> bool {
     version_timestamp(name).is_some()
 }
 
+pub fn valid_nickname(name: &str) -> bool {
+    (1..=24).contains(&name.chars().count())
+        && name.trim() == name
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+}
+
+fn archive_author(path: &Path) -> Option<String> {
+    let zip = ZipArchive::new(File::open(path).ok()?).ok()?;
+    let name = std::str::from_utf8(zip.comment())
+        .ok()?
+        .strip_prefix("GameSaves/author=")?;
+    valid_nickname(name).then(|| name.to_owned())
+}
+
+pub fn version_label(date: chrono::DateTime<chrono::Utc>, name: Option<&str>) -> String {
+    let author = name
+        .filter(|s| valid_nickname(s))
+        .unwrap_or("Автор неизвестен");
+    format!(
+        "{}  ·  {author}",
+        date.with_timezone(&chrono::Local)
+            .format("%d.%m.%Y · %H:%M:%S")
+    )
+}
+
 pub fn versions(directory: &Path) -> io::Result<Vec<(String, PathBuf)>> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -59,19 +86,14 @@ pub fn versions(directory: &Path) -> io::Result<Vec<(String, PathBuf)>> {
             continue;
         };
         if entry.file_type()?.is_file() {
-            versions.push((
-                date.with_timezone(&chrono::Local)
-                    .format("%d.%m.%Y · %H:%M:%S")
-                    .to_string(),
-                path,
-            ));
+            versions.push((version_label(date, archive_author(&path).as_deref()), path));
         }
     }
     versions.sort_by(|left, right| right.1.cmp(&left.1));
     Ok(versions)
 }
 
-pub fn publish(source: &Path, directory: &Path) -> Result<PathBuf> {
+pub fn publish(source: &Path, directory: &Path, author: &str) -> Result<PathBuf> {
     if !source.is_file() || fs::symlink_metadata(source)?.is_symlink() {
         return Err("Для отправки выбери локальный файл сохранения.".into());
     }
@@ -91,6 +113,10 @@ pub fn publish(source: &Path, directory: &Path) -> Result<PathBuf> {
         .suffix(".pending")
         .tempfile_in(directory)?;
     let mut zip = ZipWriter::new(pending.as_file_mut());
+    if !valid_nickname(author) {
+        return Err("Проверь имя игрока.".into());
+    }
+    zip.set_comment(format!("GameSaves/author={author}"));
     zip.start_file(
         "save",
         SimpleFileOptions::default()
@@ -168,10 +194,13 @@ mod tests {
         let shared = world_directory(root.path(), "subnautica-2")?;
         let local = root.path().join("savegame_0.sav");
         fs::write(&local, b"first world state")?;
-        let first = publish(&local, &shared)?;
+        let first = publish(&local, &shared, "Ваня")?;
         fs::write(&local, b"second world state")?;
-        publish(&local, &shared)?;
-        assert_eq!(versions(&shared)?.len(), 2);
+        publish(&local, &shared, "Ваня")?;
+        let rows = versions(&shared)?;
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|(label, _)| label.ends_with("Ваня")));
+        assert!(version_label(chrono::Utc::now(), None).ends_with("Автор неизвестен"));
         let backup = restore(&first, &local)?;
         assert_eq!(fs::read(&local)?, b"first world state");
         assert_eq!(fs::read(&backup)?, b"second world state");

@@ -15,6 +15,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
 struct App {
+    nickname_input: String,
     invitation: String,
     cloud_list: Option<Receiver<group::Result<Vec<(String, PathBuf)>>>>,
     cloud_checked: Option<Instant>,
@@ -58,7 +59,7 @@ impl App {
             .err()
             .map(|e| format!("Не удалось подготовить демоигру. {e}"));
         let settings_path = demo.settings_path();
-        let (settings, config_error) = match Settings::load(&settings_path) {
+        let (mut settings, config_error) = match Settings::load(&settings_path) {
             Ok(settings) => (settings, None),
             Err(error) => (Settings::default(), Some(error)),
         };
@@ -72,7 +73,16 @@ impl App {
             context,
             settings_path.parent().unwrap_or(std::path::Path::new(".")),
         );
+        if !snapshots::valid_nickname(&settings.nickname) {
+            settings.nickname = if demo.profile == "friend" {
+                "Друг"
+            } else {
+                "Игрок"
+            }
+            .into();
+        }
         let mut app = Self {
+            nickname_input: settings.nickname.clone(),
             invitation: String::new(),
             cloud_list: None,
             cloud_checked: None,
