@@ -170,12 +170,106 @@ fn gog_games() -> Vec<Game> {
     games
 }
 
+pub fn active_save<'a>(manual: Option<&'a Path>, candidates: &'a [PathBuf]) -> Option<&'a Path> {
+    if let Some(path) = manual.filter(|path| usable_save(path)) {
+        return Some(path);
+    }
+    match candidates {
+        [path] if usable_save(path) => Some(path),
+        _ => None,
+    }
+}
+
+pub fn usable_save(path: &Path) -> bool {
+    path.is_absolute()
+        && fs::symlink_metadata(path).is_ok_and(|meta| {
+            let kind = meta.file_type();
+            !is_reparse_point(&meta) && (kind.is_dir() || kind.is_file() && meta.len() > 0)
+        })
+}
+
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    meta.file_type().is_symlink()
+}
+
 pub fn save_candidates(game: &Game) -> Vec<PathBuf> {
-    if game.id != "steam:1962700" && !game.name.eq_ignore_ascii_case("Subnautica 2") {
+    if game.id == "steam:1962700" || game.name.eq_ignore_ascii_case("Subnautica 2") {
+        let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        return subnautica_saves(&game.install_dir, local_app_data.as_deref());
+    }
+    if game.id != "steam:892970" && !game.name.eq_ignore_ascii_case("Valheim") {
         return Vec::new();
     }
-    let local_app_data = env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    subnautica_saves(&game.install_dir, local_app_data.as_deref())
+
+    let mut roots = Vec::new();
+    if let Some(profile) = env::var_os("USERPROFILE") {
+        let local = PathBuf::from(profile).join("AppData/LocalLow/IronGate/Valheim");
+        roots.extend([local.join("worlds_local"), local.join("worlds")]);
+    }
+    if let Ok(steam) = steamlocate::locate() {
+        if let Ok(users) = fs::read_dir(steam.path().join("userdata")) {
+            for user in users.flatten() {
+                if user
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|id| id.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    roots.push(user.path().join("892970/remote/worlds"));
+                }
+            }
+        }
+    }
+    valheim_saves(roots)
+}
+
+fn valheim_saves(roots: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = roots
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            usable_save(path)
+                && path.is_dir()
+                && !path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("savesync-backup-"))
+                && fs::read_dir(path).is_ok_and(|files| {
+                    files.flatten().any(|entry| {
+                        let name = entry.file_name();
+                        let Some(stem) = name
+                            .to_str()
+                            .and_then(|name| name.strip_prefix("_main."))
+                            .and_then(|name| name.strip_suffix(".fwl2"))
+                        else {
+                            return false;
+                        };
+                        let base = format!("_main.{stem}");
+                        !stem.is_empty()
+                            && stem.bytes().all(|b| b.is_ascii_digit())
+                            && usable_save(&entry.path())
+                            && path.join(format!("{base}.db2")).is_file()
+                            && path.join(format!("{base}.ok")).is_file()
+                    })
+                })
+        })
+        .collect();
+    unique_paths(&mut paths);
+    paths
+}
+
+fn unique_paths(paths: &mut Vec<PathBuf>) {
+    // Separate roots can point to the same directory. Keep the original user-friendly path.
+    paths.sort();
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())));
 }
 
 fn subnautica_saves(install_dir: &Path, local_app_data: Option<&Path>) -> Vec<PathBuf> {
@@ -193,19 +287,65 @@ fn subnautica_saves(install_dir: &Path, local_app_data: Option<&Path>) -> Vec<Pa
             let path = entry.path();
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with("savegame_") && name.ends_with(".sav") && path.is_file() {
+            if name
+                .strip_prefix("savegame_")
+                .and_then(|name| name.strip_suffix(".sav"))
+                .is_some_and(|slot| !slot.is_empty() && slot.bytes().all(|b| b.is_ascii_digit()))
+                && path.is_file()
+                && usable_save(&path)
+            {
                 paths.push(path);
             }
         }
     }
-    paths.sort();
-    paths.dedup();
+    unique_paths(&mut paths);
     paths
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_save_requires_one_unambiguous_slot() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let first = root.path().join("savegame_0.sav");
+        let second = root.path().join("savegame_1.sav");
+        fs::write(&first, "one")?;
+        fs::write(&second, "two")?;
+        assert_eq!(active_save(None, &[]), None);
+        assert_eq!(
+            active_save(None, std::slice::from_ref(&first)),
+            Some(first.as_path())
+        );
+        let slots = [first.clone(), second.clone()];
+        assert_eq!(active_save(None, &slots), None);
+        assert_eq!(active_save(Some(&second), &slots), Some(second.as_path()));
+        fs::remove_file(&second)?;
+        assert_eq!(
+            active_save(Some(&second), &[first.clone()]),
+            Some(first.as_path())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valheim_ignores_map_cache_and_incomplete_saves() -> io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let world = root.path().join("Ocean");
+        let cache = root.path().join("CacheOnly");
+        let incomplete = root.path().join("Incomplete");
+        for dir in [&world, &cache, &incomplete] {
+            fs::create_dir(dir)?;
+        }
+        for name in ["_main.7.fwl2", "_main.7.db2", "_main.7.ok"] {
+            fs::write(world.join(name), "world")?;
+        }
+        fs::write(cache.join("cacheMinimap"), "cache")?;
+        fs::write(incomplete.join("_main.9.fwl2"), "metadata")?;
+        assert_eq!(valheim_saves([root.path().to_path_buf()]), [world]);
+        Ok(())
+    }
 
     #[test]
     fn subnautica_finds_worlds_in_both_locations() -> io::Result<()> {

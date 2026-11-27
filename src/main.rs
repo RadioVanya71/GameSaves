@@ -47,6 +47,7 @@ struct App {
     job: Option<Receiver<Result<String, String>>>,
     network: Option<peers::Network>,
     last_refresh: Instant,
+    saves_checked: Instant,
     new_game_name: String,
     new_game_dir: String,
     status: String,
@@ -134,6 +135,7 @@ impl App {
             job: None,
             network,
             last_refresh: Instant::now(),
+            saves_checked: Instant::now(),
             new_game_name: String::new(),
             new_game_dir: String::new(),
             status: String::new(),
@@ -163,15 +165,7 @@ impl App {
             .save_paths
             .get(&id)
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
-        let game = self.games.iter().find(|game| game.id == id);
-        self.candidates = game.map(catalog::save_candidates).unwrap_or_default();
-        self.show_setup = !self
-            .settings
-            .save_paths
-            .get(&id)
-            .is_some_and(|path| path.is_file() || path.is_dir())
-            || !(self.settings.world_codes.contains_key(&id)
-                || self.settings.groups.contains_key(&id));
+        self.show_setup = false;
         self.membership = None;
         self.joining = None;
         self.invitation.clear();
@@ -181,6 +175,7 @@ impl App {
         self.versions.clear();
         self.version = None;
         self.selected = Some(id);
+        self.scan_saves();
         self.status.clear();
         self.refresh_versions();
     }
@@ -215,9 +210,26 @@ impl App {
         self.status = "Игра добавлена.".into();
     }
 
+    fn scan_saves(&mut self) {
+        self.saves_checked = Instant::now();
+        self.candidates = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.games.iter().find(|game| &game.id == id))
+            .map(catalog::save_candidates)
+            .unwrap_or_default();
+    }
+
+    fn active_save(&self, game_id: &str) -> Option<&std::path::Path> {
+        catalog::active_save(
+            self.settings.save_paths.get(game_id).map(PathBuf::as_path),
+            &self.candidates,
+        )
+    }
+
     fn remember_path(&mut self, id: &str) {
         let path = PathBuf::from(self.save_path.trim());
-        if !path.is_absolute() || !(path.is_file() || path.is_dir()) {
+        if !catalog::usable_save(&path) {
             self.status = "Выберите существующий файл или папку сохранений.".into();
             return;
         }

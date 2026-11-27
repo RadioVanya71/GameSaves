@@ -383,7 +383,7 @@ impl App {
                         .button(if self.show_setup {
                             "Скрыть настройки"
                         } else {
-                            "Настройки игры"
+                            "Сохранение и обложка"
                         })
                         .clicked()
                     {
@@ -476,12 +476,7 @@ impl App {
         }
     }
     fn send_save(&mut self, ui: &mut egui::Ui, game: &Game) {
-        let ready_save = self
-            .settings
-            .save_paths
-            .get(&game.id)
-            .filter(|path| path.is_file() || path.is_dir())
-            .cloned();
+        let ready_save = self.active_save(&game.id).map(std::path::Path::to_path_buf);
         let world = self.world();
         let cloud = self.group();
         let ready = ready_save.is_some()
@@ -495,13 +490,39 @@ impl App {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(heading("Отправка сохранения", 22.0));
-            if ready {
-                muted(ui, "Сохрани прогресс и закрой игру перед отправкой.");
-            } else {
-                muted(
-                    ui,
-                    "Выбери сейв в настройках игры. Для обмена с другом подключись к группе по приглашению.",
-                );
+            match ready_save.as_ref() {
+                Some(path) => {
+                    let slot = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                    ui.label(format!("Сохранение: {slot}")).on_hover_text(path.display().to_string());
+                    if ready {
+                        muted(ui, "Сохрани игру и закрой её перед отправкой.");
+                    } else {
+                        muted(ui, "Для отправки подключись к группе.");
+                    }
+                }
+                None if !self.candidates.is_empty() => {
+                    let mut choice = None;
+                    egui::ComboBox::from_id_salt("choose-save-slot")
+                        .selected_text("Выбери мир или слот")
+                        .show_ui(ui, |ui| {
+                            for path in &self.candidates {
+                                if ui.selectable_label(false, path.file_name().unwrap_or(path.as_os_str()).to_string_lossy())
+                                    .on_hover_text(path.display().to_string()).clicked() {
+                                    choice = Some(path.clone());
+                                }
+                            }
+                        });
+                    if let Some(path) = choice {
+                        self.save_path = path.display().to_string();
+                        self.remember_path(&game.id);
+                    }
+                }
+                None => {
+                    muted(ui, "Сохранение не найдено. Сохранись в игре и закрой её. Если после этого слот не появился, его можно выбрать вручную.");
+                    if ui.button("Выбрать вручную").clicked() {
+                        self.show_setup = true;
+                    }
+                }
             }
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
@@ -556,11 +577,7 @@ impl App {
                     self.version = Some(path.clone());
                 }
             }
-            let destination = self
-                .settings
-                .save_paths
-                .get(&game.id)
-                .filter(|path| path.is_file() || path.is_dir());
+            let destination = self.active_save(&game.id);
             if ui
                 .add_enabled(
                     destination.is_some() && self.version.is_some(),
@@ -568,7 +585,10 @@ impl App {
                 )
                 .clicked()
             {
-                self.restore_confirmation = self.version.clone().zip(destination.cloned());
+                self.restore_confirmation = self
+                    .version
+                    .clone()
+                    .zip(destination.map(std::path::Path::to_path_buf));
             }
         });
     }
@@ -576,7 +596,7 @@ impl App {
     fn setup(&mut self, ui: &mut egui::Ui, game: &Game) {
         panel().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(heading("Настройки игры", 22.0));
+            ui.label(heading("Сохранение и обложка", 22.0));
             ui.label("Файл сохранения или папка одного мира");
             if !self.candidates.is_empty() {
                 egui::ComboBox::from_id_salt("candidates")
@@ -767,6 +787,9 @@ impl App {
         self.poll_group(ctx);
         let idle = self.job.is_none();
         if self.selected.is_some() && idle {
+            if self.saves_checked.elapsed() >= Duration::from_secs(4) {
+                self.scan_saves();
+            }
             let interval = Duration::from_secs(2);
             if self.last_refresh.elapsed() >= interval {
                 self.refresh_versions();
@@ -973,12 +996,12 @@ impl App {
     fn rescan(&mut self) {
         self.games = catalog::discover(&self.settings.custom_games);
         self.artwork.rescan(&self.games);
-        if let Some(game) = self
+        if self
             .games
             .iter()
-            .find(|game| Some(&game.id) == self.selected.as_ref())
+            .any(|game| Some(&game.id) == self.selected.as_ref())
         {
-            self.candidates = catalog::save_candidates(game);
+            self.scan_saves();
         } else if let Some(game) = self.games.first() {
             self.select(game.id.clone());
         } else {
@@ -1013,7 +1036,7 @@ impl App {
                             ui.add_space(if horizontal { 14.0 } else { 4.0 });
                             ui.vertical(|ui| {
                                 ui.label(heading("Добавь первую игру", 29.0));
-                                muted(ui, "Добавь игру, затем в её настройках выбери файл сохранения или папку мира. Если игр нет, нажми «Деморежим» вверху.");
+                                muted(ui, "Добавь игру. GameSaves попробует найти сейв сам. Если игр нет, нажми «Деморежим» вверху.");
                                 ui.add_space(6.0);
                                 ui.horizontal_wrapped(|ui| {
                                 if ui.add(primary("Добавить игру")).clicked() {
