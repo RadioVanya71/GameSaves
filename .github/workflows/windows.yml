@@ -2,7 +2,7 @@ name: Windows build
 
 on:
   push:
-    branches: [main]
+    branches: [main, direct-drive]
     paths:
       - '.github/workflows/windows.yml'
       - 'Cargo.toml'
@@ -14,9 +14,6 @@ on:
 
 permissions:
   contents: read
-
-env:
-  GAMESAVES_GROUP_ORIGIN: ${{ vars.GAMESAVES_GROUP_ORIGIN }}
 
 jobs:
   build:
@@ -38,6 +35,9 @@ jobs:
         shell: pwsh
         run: cargo +1.100.0 test --locked
       - name: Build application
+        env:
+          GAMESAVES_GOOGLE_CLIENT_ID: ${{ vars.GAMESAVES_GOOGLE_CLIENT_ID }}
+          GAMESAVES_GOOGLE_CLIENT_SECRET: ${{ secrets.GAMESAVES_GOOGLE_CLIENT_SECRET }}
         shell: pwsh
         run: cargo +1.100.0 build --locked --release
       - name: Bundle Windows build
@@ -54,7 +54,7 @@ jobs:
   release:
     name: Publish tested Windows ZIP
     needs: build
-    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release GameSaves ')
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release GameSaves ')
     runs-on: ubuntu-latest
     permissions:
       contents: write

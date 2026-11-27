@@ -3,7 +3,7 @@
 mod artwork;
 mod catalog;
 mod demo;
-mod group;
+mod drive;
 mod peers;
 mod snapshots;
 mod ui;
@@ -17,17 +17,14 @@ use std::time::Instant;
 
 struct App {
     nickname_input: String,
-    invitation: String,
-    cloud_list:
-        Option<Receiver<group::Result<(Option<group::Membership>, Vec<(String, PathBuf)>)>>>,
-    membership: Option<group::Membership>,
-    joining: Option<Receiver<group::Result<String>>>,
+    drive: Option<drive::Drive>,
+    connect_drive: Option<Receiver<drive::Result<drive::Drive>>>,
+    cloud_list: Option<Receiver<drive::Result<Vec<(String, PathBuf)>>>>,
     cloud_checked: Option<Instant>,
     cloud_error: String,
     jump_to_history: bool,
     demo: demo::Demo,
     demo_mode: bool,
-    group_origin: Option<String>,
     friend_window: Option<std::process::Child>,
     demo_level: String,
     settings: Settings,
@@ -94,28 +91,24 @@ impl App {
             }
             .into();
         }
+        let (drive, drive_error) = if demo_mode {
+            (None, String::new())
+        } else {
+            match drive::load(&settings_path.with_file_name("google-drive.dat")) {
+                Ok(drive) => (drive, String::new()),
+                Err(e) => (None, e),
+            }
+        };
         let mut app = Self {
             nickname_input: settings.nickname.clone(),
-            invitation: String::new(),
+            drive,
+            connect_drive: None,
             cloud_list: None,
-            membership: None,
-            joining: None,
             cloud_checked: None,
-            cloud_error: String::new(),
+            cloud_error: drive_error,
             jump_to_history: false,
             demo,
             demo_mode,
-            group_origin: std::env::var("GAMESAVES_GROUP_ORIGIN")
-                .ok()
-                .or_else(|| option_env!("GAMESAVES_GROUP_ORIGIN").map(str::to_owned))
-                .and_then(|s| url::Url::parse(&s).ok())
-                .filter(|url| {
-                    url.scheme() == "https"
-                        && url.host_str().is_some()
-                        && url.username().is_empty()
-                        && url.password().is_none()
-                })
-                .map(|url| url.origin().ascii_serialization()),
             friend_window: None,
             demo_level: String::new(),
             settings,
@@ -166,9 +159,6 @@ impl App {
             .get(&id)
             .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
         self.show_setup = false;
-        self.membership = None;
-        self.joining = None;
-        self.invitation.clear();
         self.cloud_list = None;
         self.cloud_checked = None;
         self.cloud_error.clear();
@@ -276,7 +266,7 @@ impl App {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|_| "неизвестен".into());
         }
-        if self.group().is_some() {
+        if self.drive.is_some() {
             return;
         }
         let inspect_older = self
@@ -308,28 +298,83 @@ impl App {
             .or_else(|| self.versions.first().map(|(_, path)| path.clone()));
     }
 
-    fn group(&self) -> Option<group::Group> {
-        group::Group::parse(self.settings.groups.get(self.selected.as_ref()?)?).ok()
+    fn start_drive_connection(&mut self, client: drive::Client, ctx: &egui::Context) {
+        if self.connect_drive.is_some() {
+            return;
+        }
+        self.cloud_error.clear();
+        let (tx, rx) = mpsc::channel();
+        self.connect_drive = Some(rx);
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(drive::Drive::connect(client));
+            context.request_repaint();
+        });
     }
 
-    fn poll_group(&mut self, ctx: &egui::Context) {
-        let Some(group) = self.group() else { return };
+    fn reset_drive_history(&mut self) {
+        self.cloud_list = None;
+        self.cloud_checked = None;
+        self.versions.clear();
+        self.version = None;
+        self.cloud_error.clear();
+        self.restore_confirmation = None;
+    }
+
+    fn poll_drive(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.connect_drive {
+            match rx.try_recv() {
+                Ok(Ok(new_drive)) => {
+                    self.connect_drive = None;
+                    match drive::save(
+                        &self.settings_path.with_file_name("google-drive.dat"),
+                        &new_drive,
+                    ) {
+                        Ok(()) => {
+                            self.drive = Some(new_drive);
+                            self.reset_drive_history();
+                            self.status = "Google Диск подключён.".into();
+                        }
+                        Err(e) => self.cloud_error = e,
+                    }
+                }
+                Ok(Err(e)) => {
+                    self.connect_drive = None;
+                    self.cloud_error = e;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.connect_drive = None;
+                    self.cloud_error = "Подключение прервано.".into();
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        let Some(drive) = self.drive.clone() else {
+            return;
+        };
+        let Some(game) = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.games.iter().find(|game| &game.id == id))
+        else {
+            return;
+        };
         if let Some(rx) = &self.cloud_list {
             match rx.try_recv() {
                 Err(TryRecvError::Empty) => return,
-                Ok(Ok((membership, rows))) => {
-                    self.membership = membership;
-                    self.version = self
-                        .version
-                        .take()
-                        .filter(|v| rows.iter().any(|(_, p)| p == v))
+                Ok(Ok(rows)) => {
+                    let previous = self.version.take();
+                    let previous_was_latest =
+                        previous.as_ref() == self.versions.first().map(|(_, p)| p);
+                    self.version = previous
+                        .filter(|v| !previous_was_latest && rows.iter().any(|(_, p)| p == v))
                         .or_else(|| rows.first().map(|(_, p)| p.clone()));
                     self.versions = rows;
                     self.cloud_error.clear();
                 }
-                _ => {
-                    self.cloud_error =
-                        "Не удалось обновить историю группы. Проверь связь или приглашение.".into()
+                Ok(Err(e)) => self.cloud_error = e,
+                Err(TryRecvError::Disconnected) => {
+                    self.cloud_error = "Не удалось обновить историю Google Диска.".into()
                 }
             }
             self.cloud_list = None;
@@ -343,25 +388,10 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.cloud_list = Some(rx);
         self.cloud_checked = Some(Instant::now());
+        let key = drive::game_key(game);
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let result = (|| {
-                let membership = if group.device {
-                    Some(group.membership()?)
-                } else {
-                    None
-                };
-                let authorized = membership
-                    .as_ref()
-                    .is_none_or(|m| matches!(m.role.as_str(), "owner" | "member"));
-                let rows = if authorized {
-                    group.list()?
-                } else {
-                    Vec::new()
-                };
-                Ok((membership, rows))
-            })();
-            let _ = tx.send(result);
+            let _ = tx.send(drive.list(&key));
             context.request_repaint();
         });
     }
@@ -390,6 +420,7 @@ impl App {
             Err(TryRecvError::Empty) => return,
         };
         self.job = None;
+        self.cloud_list = None;
         self.cloud_checked = None;
         self.refresh_versions();
     }
@@ -414,10 +445,10 @@ impl App {
                 ui.horizontal(|ui| {
                     if ui.button("Восстановить").clicked() {
                         self.restore_confirmation = None;
-                        let group = self.group();
+                        let drive = self.drive.clone();
                         self.start_job(ctx, move || {
-                            match group {
-                                Some(g) => g.restore(&version, &destination),
+                            match drive {
+                                Some(drive) => drive.restore(&version, &destination),
                                 None => snapshots::restore(&version, &destination)
                                     .map_err(|e| e.to_string()),
                             }
