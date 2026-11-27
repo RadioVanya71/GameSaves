@@ -76,7 +76,8 @@ impl Drive {
         let metadata: Metadata = json(http(30)
             .get(format!("{FILES}/{folder_id}?supportsAllDrives=true&fields=name,mimeType,trashed,capabilities(canAddChildren)"))
             .header("Authorization", bearer(&tokens.access_token))
-            .call().map_err(request_error)?)?;
+            .call().map_err(|e| format!("Проверка папки на www.googleapis.com. {}", request_error(e)))?)
+            .map_err(|e| format!("Проверка папки. {e}"))?;
         if metadata.mime_type != FOLDER
             || metadata.trashed
             || !metadata.capabilities.can_add_children
@@ -326,9 +327,13 @@ fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 fn http(seconds: u64) -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .https_only(true)
+            .tls_config(tls)
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(seconds)))
             .build(),
@@ -358,13 +363,40 @@ fn request_error(error: ureq::Error) -> String {
         }
         ureq::Error::StatusCode(404) => "Папка или архив не найдены на Google Диске.".into(),
         ureq::Error::StatusCode(code) => format!("Google Диск вернул ошибку HTTP {code}."),
-        _ => "Не удалось завершить запрос к Google. Проверь подключение к интернету.".into(),
+        ureq::Error::HostNotFound => "Не удалось определить адрес Google (DNS).".into(),
+        ureq::Error::Timeout(_) => "Google не ответил вовремя.".into(),
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => {
+            "Не удалось установить защищённое соединение с Google (TLS).".into()
+        }
+        ureq::Error::InvalidProxyUrl | ureq::Error::ConnectProxyFailed(_) => {
+            "Не удалось соединиться с Google через прокси.".into()
+        }
+        ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            "Не удалось проверить защищённое соединение с Google (TLS).".into()
+        }
+        ureq::Error::Io(e) => match e.raw_os_error() {
+            Some(code) => format!("Соединение с Google прервалось (код системы {code})."),
+            None => format!("Соединение с Google прервалось ({}).", e.kind()),
+        },
+        ureq::Error::Protocol(_) => "Получен некорректный сетевой ответ от Google.".into(),
+        _ => "Не удалось установить соединение с Google.".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connection_errors_identify_the_cause() {
+        assert!(request_error(ureq::Error::HostNotFound).contains("DNS"));
+        assert!(request_error(ureq::Error::Tls("certificate")).contains("TLS"));
+        assert!(
+            request_error(ureq::Error::Io(std::io::Error::from_raw_os_error(10060)))
+                .contains("10060")
+        );
+        assert!(request_error(ureq::Error::InvalidProxyUrl).contains("прокси"));
+    }
+
     #[test]
     fn folder_connection_survives_a_restart() -> Result<()> {
         let registration = serde_json::json!({

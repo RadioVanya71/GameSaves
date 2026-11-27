@@ -64,13 +64,14 @@ impl Client {
         ];
         form.extend(fields);
         let response = http(30).post(TOKEN).send_form(form);
-        match response {
+        let result = match response {
             Ok(response) => json(response),
             Err(ureq::Error::StatusCode(400 | 401)) => {
-                Err("Google не принял доступ. Проверь регистрацию или подключи Диск заново.".into())
+                Err("Google не принял код входа. Подключи Диск заново и выбери аккаунт из списка тестировщиков.".into())
             }
             Err(e) => Err(super::request_error(e)),
-        }
+        };
+        result.map_err(|e| format!("Получение доступа на oauth2.googleapis.com. {e}"))
     }
 
     pub fn refresh(&self, secret: &str) -> Result<Tokens> {
@@ -167,7 +168,11 @@ pub fn authorize(client: &Client) -> Result<(Tokens, String)> {
                 return Err(err);
             }
         };
-        reply(&mut socket, "200 OK", "Папка выбрана. Вернись в GameSaves.");
+        reply(
+            &mut socket,
+            "200 OK",
+            "Выбор папки получен. Результат подключения появится в GameSaves.",
+        );
         let tokens = client.token([
             ("grant_type", "authorization_code"),
             ("code", code.as_str()),
@@ -212,7 +217,7 @@ fn reply(socket: &mut impl Write, status: &str, text: &str) {
     let mut socket = BufWriter::new(socket);
     let _ = write!(
         socket,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     let _ = socket.flush();

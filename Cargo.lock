@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "game-saves"
-version = "0.7.0-beta.1"
+version = "0.7.0-beta.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4670,6 +4670,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "ureq-proto",
  "utf8-zero",
  "webpki-roots",
