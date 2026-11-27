@@ -418,31 +418,44 @@ impl App {
                         "Создать группу",
                         format!("{}/create", url.trim_end_matches('/')),
                     );
+                    self.invite_field(ui, game);
                 } else {
-                    muted(
-                        ui,
-                        "Создание групп станет доступно после подключения сервиса.",
-                    );
+                    muted(ui, "В этой сборке сервис групп не подключён. Создать группу из папки Google Диска пока нельзя.");
+                    ui.collapsing("У меня есть приглашение GameSaves", |ui| {
+                        self.invite_field(ui, game);
+                    });
                 }
-                ui.horizontal_wrapped(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.invitation)
-                            .hint_text("Ссылка-приглашение")
-                            .password(true),
-                    );
-                    if ui.button("Войти по ссылке").clicked() {
-                        let link = self.invitation.trim().to_string();
-                        match crate::group::Group::parse(&link) {
-                            Ok(_) => self.change_group(game, Some(link)),
-                            Err(e) => self.status = e,
-                        }
-                    }
-                });
             }
             if !self.cloud_error.is_empty() {
                 ui.label(&self.cloud_error);
             }
         });
+    }
+    fn invite_field(&mut self, ui: &mut egui::Ui, game: &Game) {
+        ui.label("Приглашение GameSaves от владельца группы");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.invitation)
+                .hint_text("Вставь приглашение")
+                .password(true),
+        );
+        let input = self.invitation.trim();
+        let parsed = crate::group::Group::parse(input);
+        if !input.is_empty() && parsed.is_err() {
+            let drive = url::Url::parse(input)
+                .ok()
+                .is_some_and(|u| u.host_str() == Some("drive.google.com"));
+            ui.label(egui::RichText::new(if drive {
+                "Это ссылка на папку Google Диска. Для входа друг должен прислать приглашение из GameSaves."
+            } else {
+                "Скопируй приглашение целиком, включая часть после #."
+            }).color(ALERT));
+        }
+        if ui
+            .add_enabled(parsed.is_ok(), egui::Button::new("Войти в группу"))
+            .clicked()
+        {
+            self.change_group(game, Some(input.to_string()));
+        }
     }
     fn change_group(&mut self, game: &Game, link: Option<String>) {
         if self.config_error.is_some() {
